@@ -20,37 +20,15 @@
 #include <math/vec3.h>
 #include <utils/Entity.h>
 #include <mujoco/mujoco.h>
+#include "experimental/filament/filament/filament_context.h"
+#include "experimental/filament/render_context_filament.h"
 
 namespace mujoco {
 
 // Manages the filament Entities for a single mjvLight.
-class Light {
+class Light : public mjrLight {
  public:
-  // Configuration parameters for a light.
-  struct Params {
-    // The type of light (e.g. spot, point, directional, etc.)
-    mjtLightType type;
-    // The color of the light.
-    filament::math::float3 color = {0, 0, 0};
-    // The intensity of the light, in candela.
-    float intensity = 0.0f;
-    // Whether or not the light casts shadows.
-    bool castshadow = true;
-    // The range/distance in which the light is effective, in meters.
-    float range = 10.0f;
-    // The angle of the spot light cone, in degrees.
-    float spot_cone_angle = 180.f;
-    // The radius of the bulb used for soft shadows.
-    float bulbradius = 0.0f;
-    // The size of the shadow map.
-    int shadow_map_size = 2048;
-    // Blur width for EL VSM.
-    float vsm_blur_width = 0.0f;
-    // Whether or not the light is a headlight.
-    bool headlight = false;
-  };
-
-  Light(filament::Engine* engine, const Params& params);
+  Light(FilamentContext* ctx, const mjrLightParams& params);
   ~Light() noexcept;
 
   Light(const Light&) = delete;
@@ -72,18 +50,26 @@ class Light {
   // Sets the intensity of the light in candela.
   void SetIntensity(float intensity);
 
+  // Returns the type of the light.
+  mjtLightType GetType() const { return params_.type; }
+
   // Enables/disables the light in the scene.
   void Enable();
   void Disable();
 
-  // Returns true if the light is a headlight.
-  bool IsHeadlight() const { return params_.headlight; }
+  static Light* downcast(mjrLight* light) {
+    return static_cast<Light*>(light);
+  }
+  static const Light* downcast(const mjrLight* light) {
+    return static_cast<const Light*>(light);
+  }
 
  private:
   filament::Engine* engine_ = nullptr;
+  filament::IndirectLight* ibl_ = nullptr;
   utils::Entity entity_;
   bool enabled_ = true;
-  Params params_;
+  mjrLightParams params_;
 };
 
 }  // namespace mujoco

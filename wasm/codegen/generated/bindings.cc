@@ -2446,6 +2446,15 @@ struct MjsFlex {
   void set_elastic2d(int value) {
     ptr_->elastic2d = value;
   }
+  emscripten::val cellcount() const {
+    return emscripten::val(emscripten::typed_memory_view(3, ptr_->cellcount));
+  }
+  int order() const {
+    return ptr_->order;
+  }
+  void set_order(int value) {
+    ptr_->order = value;
+  }
   mjStringVec &nodebody() const {
     return *(ptr_->nodebody);
   }
@@ -3737,6 +3746,18 @@ struct MjModel {
   void set_nflexelemdata(int value) {
     ptr_->nflexelemdata = static_cast<mjtSize>(value);
   }
+  int nflexstiffness() const {
+    return static_cast<int>(ptr_->nflexstiffness);
+  }
+  void set_nflexstiffness(int value) {
+    ptr_->nflexstiffness = static_cast<mjtSize>(value);
+  }
+  int nflexbending() const {
+    return static_cast<int>(ptr_->nflexbending);
+  }
+  void set_nflexbending(int value) {
+    ptr_->nflexbending = static_cast<mjtSize>(value);
+  }
   int nflexelemedge() const {
     return static_cast<int>(ptr_->nflexelemedge);
   }
@@ -4634,6 +4655,12 @@ struct MjModel {
   emscripten::val flex_interp() const {
     return emscripten::val(emscripten::typed_memory_view(ptr_->nflex, ptr_->flex_interp));
   }
+  emscripten::val flex_bandwidth() const {
+    return emscripten::val(emscripten::typed_memory_view(ptr_->nflex, ptr_->flex_bandwidth));
+  }
+  emscripten::val flex_cellnum() const {
+    return emscripten::val(emscripten::typed_memory_view(ptr_->nflex * 3, ptr_->flex_cellnum));
+  }
   emscripten::val flex_nodeadr() const {
     return emscripten::val(emscripten::typed_memory_view(ptr_->nflex, ptr_->flex_nodeadr));
   }
@@ -4661,8 +4688,14 @@ struct MjModel {
   emscripten::val flex_elemdataadr() const {
     return emscripten::val(emscripten::typed_memory_view(ptr_->nflex, ptr_->flex_elemdataadr));
   }
+  emscripten::val flex_stiffnessadr() const {
+    return emscripten::val(emscripten::typed_memory_view(ptr_->nflex, ptr_->flex_stiffnessadr));
+  }
   emscripten::val flex_elemedgeadr() const {
     return emscripten::val(emscripten::typed_memory_view(ptr_->nflex, ptr_->flex_elemedgeadr));
+  }
+  emscripten::val flex_bendingadr() const {
+    return emscripten::val(emscripten::typed_memory_view(ptr_->nflex, ptr_->flex_bendingadr));
   }
   emscripten::val flex_shellnum() const {
     return emscripten::val(emscripten::typed_memory_view(ptr_->nflex, ptr_->flex_shellnum));
@@ -4746,10 +4779,10 @@ struct MjModel {
     return emscripten::val(emscripten::typed_memory_view(ptr_->nflex * 3, ptr_->flex_size));
   }
   emscripten::val flex_stiffness() const {
-    return emscripten::val(emscripten::typed_memory_view(ptr_->nflexelem * 21, ptr_->flex_stiffness));
+    return emscripten::val(emscripten::typed_memory_view(ptr_->nflexstiffness, ptr_->flex_stiffness));
   }
   emscripten::val flex_bending() const {
-    return emscripten::val(emscripten::typed_memory_view(ptr_->nflexedge * 17, ptr_->flex_bending));
+    return emscripten::val(emscripten::typed_memory_view(ptr_->nflexbending, ptr_->flex_bending));
   }
   emscripten::val flex_damping() const {
     return emscripten::val(emscripten::typed_memory_view(ptr_->nflex, ptr_->flex_damping));
@@ -8821,6 +8854,10 @@ void mj_makeM_wrapper(const MjModel& m, MjData& d) {
   mj_makeM(m.get(), d.get());
 }
 
+int mj_maxContact_wrapper(const MjModel& m, int g1, int g2, int has_margin) {
+  return mj_maxContact(m.get(), g1, g2, has_margin);
+}
+
 void mj_mulJacTVec_wrapper(const MjModel& m, const MjData& d, const val& res, const NumberArray& vec) {
   UNPACK_VALUE(mjtNum, res);
   UNPACK_ARRAY(mjtNum, vec);
@@ -9876,6 +9913,18 @@ std::string mjs_setToCylinder_wrapper(MjsActuator& actuator, double timeconst, d
   return std::string(mjs_setToCylinder(actuator.get(), timeconst, bias, area, diameter));
 }
 
+std::string mjs_setToDCMotor_wrapper(MjsActuator& actuator, const val& motorconst, double resistance, const val& nominal, const val& saturation, const val& inductance, const val& cogging, const val& controller, const val& thermal, const val& lugre, int input_mode) {
+  UNPACK_NULLABLE_VALUE(double, motorconst);
+  UNPACK_NULLABLE_VALUE(double, nominal);
+  UNPACK_NULLABLE_VALUE(double, saturation);
+  UNPACK_NULLABLE_VALUE(double, inductance);
+  UNPACK_NULLABLE_VALUE(double, cogging);
+  UNPACK_NULLABLE_VALUE(double, controller);
+  UNPACK_NULLABLE_VALUE(double, thermal);
+  UNPACK_NULLABLE_VALUE(double, lugre);
+  return std::string(mjs_setToDCMotor(actuator.get(), motorconst_.data(), resistance, nominal_.data(), saturation_.data(), inductance_.data(), cogging_.data(), controller_.data(), thermal_.data(), lugre_.data(), input_mode));
+}
+
 std::string mjs_setToDamper_wrapper(MjsActuator& actuator, double kv) {
   return std::string(mjs_setToDamper(actuator.get(), kv));
 }
@@ -10589,6 +10638,15 @@ mjtNum mju_sum_wrapper(const NumberArray& vec, int n) {
   return mju_sum(vec_.data(), n);
 }
 
+void mju_sym2dense_wrapper(const val& res, const NumberArray& mat, int n, const NumberArray& rownnz, const NumberArray& rowadr, const NumberArray& colind) {
+  UNPACK_VALUE(mjtNum, res);
+  UNPACK_ARRAY(mjtNum, mat);
+  UNPACK_ARRAY(int, rownnz);
+  UNPACK_ARRAY(int, rowadr);
+  UNPACK_ARRAY(int, colind);
+  mju_sym2dense(res_.data(), mat_.data(), n, rownnz_.data(), rowadr_.data(), colind_.data());
+}
+
 void mju_symmetrize_wrapper(const val& res, const NumberArray& mat, int n) {
   UNPACK_VALUE(mjtNum, res);
   UNPACK_ARRAY(mjtNum, mat);
@@ -10812,6 +10870,7 @@ EMSCRIPTEN_BINDINGS(mujoco_bindings) {
     .value("mjBIAS_NONE", mjBIAS_NONE)
     .value("mjBIAS_AFFINE", mjBIAS_AFFINE)
     .value("mjBIAS_MUSCLE", mjBIAS_MUSCLE)
+    .value("mjBIAS_DCMOTOR", mjBIAS_DCMOTOR)
     .value("mjBIAS_USER", mjBIAS_USER);
   enum_<mjtBuiltin>("mjtBuiltin")
     .value("mjBUILTIN_NONE", mjBUILTIN_NONE)
@@ -10905,6 +10964,7 @@ EMSCRIPTEN_BINDINGS(mujoco_bindings) {
     .value("mjDSBL_AUTORESET", mjDSBL_AUTORESET)
     .value("mjDSBL_NATIVECCD", mjDSBL_NATIVECCD)
     .value("mjDSBL_ISLAND", mjDSBL_ISLAND)
+    .value("mjDSBL_MULTICCD", mjDSBL_MULTICCD)
     .value("mjNDISABLE", mjNDISABLE);
   enum_<mjtDyn>("mjtDyn")
     .value("mjDYN_NONE", mjDYN_NONE)
@@ -10912,13 +10972,13 @@ EMSCRIPTEN_BINDINGS(mujoco_bindings) {
     .value("mjDYN_FILTER", mjDYN_FILTER)
     .value("mjDYN_FILTEREXACT", mjDYN_FILTEREXACT)
     .value("mjDYN_MUSCLE", mjDYN_MUSCLE)
+    .value("mjDYN_DCMOTOR", mjDYN_DCMOTOR)
     .value("mjDYN_USER", mjDYN_USER);
   enum_<mjtEnableBit>("mjtEnableBit")
     .value("mjENBL_OVERRIDE", mjENBL_OVERRIDE)
     .value("mjENBL_ENERGY", mjENBL_ENERGY)
     .value("mjENBL_FWDINV", mjENBL_FWDINV)
     .value("mjENBL_INVDISCRETE", mjENBL_INVDISCRETE)
-    .value("mjENBL_MULTICCD", mjENBL_MULTICCD)
     .value("mjENBL_SLEEP", mjENBL_SLEEP)
     .value("mjNENABLE", mjNENABLE);
   enum_<mjtEq>("mjtEq")
@@ -10974,6 +11034,7 @@ EMSCRIPTEN_BINDINGS(mujoco_bindings) {
     .value("mjGAIN_FIXED", mjGAIN_FIXED)
     .value("mjGAIN_AFFINE", mjGAIN_AFFINE)
     .value("mjGAIN_MUSCLE", mjGAIN_MUSCLE)
+    .value("mjGAIN_DCMOTOR", mjGAIN_DCMOTOR)
     .value("mjGAIN_USER", mjGAIN_USER);
   enum_<mjtGeom>("mjtGeom")
     .value("mjGEOM_PLANE", mjGEOM_PLANE)
@@ -11365,7 +11426,6 @@ EMSCRIPTEN_BINDINGS(mujoco_bindings) {
     .value("mjWARN_INERTIA", mjWARN_INERTIA)
     .value("mjWARN_CONTACTFULL", mjWARN_CONTACTFULL)
     .value("mjWARN_CNSTRFULL", mjWARN_CNSTRFULL)
-    .value("mjWARN_VGEOMFULL", mjWARN_VGEOMFULL)
     .value("mjWARN_BADQPOS", mjWARN_BADQPOS)
     .value("mjWARN_BADQVEL", mjWARN_BADQVEL)
     .value("mjWARN_BADQACC", mjWARN_BADQACC)
@@ -11780,9 +11840,12 @@ EMSCRIPTEN_BINDINGS(mujoco_bindings) {
     .property("eq_type", &MjModel::eq_type)
     .property("exclude_signature", &MjModel::exclude_signature)
     .property("flex_activelayers", &MjModel::flex_activelayers)
+    .property("flex_bandwidth", &MjModel::flex_bandwidth)
     .property("flex_bending", &MjModel::flex_bending)
+    .property("flex_bendingadr", &MjModel::flex_bendingadr)
     .property("flex_bvhadr", &MjModel::flex_bvhadr)
     .property("flex_bvhnum", &MjModel::flex_bvhnum)
+    .property("flex_cellnum", &MjModel::flex_cellnum)
     .property("flex_centered", &MjModel::flex_centered)
     .property("flex_conaffinity", &MjModel::flex_conaffinity)
     .property("flex_condim", &MjModel::flex_condim)
@@ -11834,6 +11897,7 @@ EMSCRIPTEN_BINDINGS(mujoco_bindings) {
     .property("flex_solmix", &MjModel::flex_solmix)
     .property("flex_solref", &MjModel::flex_solref)
     .property("flex_stiffness", &MjModel::flex_stiffness)
+    .property("flex_stiffnessadr", &MjModel::flex_stiffnessadr)
     .property("flex_texcoord", &MjModel::flex_texcoord)
     .property("flex_texcoordadr", &MjModel::flex_texcoordadr)
     .property("flex_vert", &MjModel::flex_vert)
@@ -12024,6 +12088,7 @@ EMSCRIPTEN_BINDINGS(mujoco_bindings) {
     .property("neq", &MjModel::neq, &MjModel::set_neq, reference())
     .property("nexclude", &MjModel::nexclude, &MjModel::set_nexclude, reference())
     .property("nflex", &MjModel::nflex, &MjModel::set_nflex, reference())
+    .property("nflexbending", &MjModel::nflexbending, &MjModel::set_nflexbending, reference())
     .property("nflexedge", &MjModel::nflexedge, &MjModel::set_nflexedge, reference())
     .property("nflexelem", &MjModel::nflexelem, &MjModel::set_nflexelem, reference())
     .property("nflexelemdata", &MjModel::nflexelemdata, &MjModel::set_nflexelemdata, reference())
@@ -12031,6 +12096,7 @@ EMSCRIPTEN_BINDINGS(mujoco_bindings) {
     .property("nflexevpair", &MjModel::nflexevpair, &MjModel::set_nflexevpair, reference())
     .property("nflexnode", &MjModel::nflexnode, &MjModel::set_nflexnode, reference())
     .property("nflexshelldata", &MjModel::nflexshelldata, &MjModel::set_nflexshelldata, reference())
+    .property("nflexstiffness", &MjModel::nflexstiffness, &MjModel::set_nflexstiffness, reference())
     .property("nflextexcoord", &MjModel::nflextexcoord, &MjModel::set_nflextexcoord, reference())
     .property("nflexvert", &MjModel::nflexvert, &MjModel::set_nflexvert, reference())
     .property("ngeom", &MjModel::ngeom, &MjModel::set_ngeom, reference())
@@ -12544,6 +12610,7 @@ EMSCRIPTEN_BINDINGS(mujoco_bindings) {
     .property("info", &MjsExclude::info, &MjsExclude::set_info, reference());
   emscripten::class_<MjsFlex>("MjsFlex")
     .property("activelayers", &MjsFlex::activelayers, &MjsFlex::set_activelayers, reference())
+    .property("cellcount", &MjsFlex::cellcount)
     .property("conaffinity", &MjsFlex::conaffinity, &MjsFlex::set_conaffinity, reference())
     .property("condim", &MjsFlex::condim, &MjsFlex::set_condim, reference())
     .property("contype", &MjsFlex::contype, &MjsFlex::set_contype, reference())
@@ -12565,6 +12632,7 @@ EMSCRIPTEN_BINDINGS(mujoco_bindings) {
     .property("material", &MjsFlex::material, &MjsFlex::set_material, reference())
     .property("node", &MjsFlex::node, reference())
     .property("nodebody", &MjsFlex::nodebody, reference())
+    .property("order", &MjsFlex::order, &MjsFlex::set_order, reference())
     .property("passive", &MjsFlex::passive, &MjsFlex::set_passive, reference())
     .property("poisson", &MjsFlex::poisson, &MjsFlex::set_poisson, reference())
     .property("priority", &MjsFlex::priority, &MjsFlex::set_priority, reference())
@@ -13129,6 +13197,7 @@ EMSCRIPTEN_BINDINGS(mujoco_bindings) {
   function("mj_local2Global", &mj_local2Global_wrapper);
   function("mj_makeConstraint", &mj_makeConstraint_wrapper);
   function("mj_makeM", &mj_makeM_wrapper);
+  function("mj_maxContact", &mj_maxContact_wrapper);
   function("mj_mulJacTVec", &mj_mulJacTVec_wrapper);
   function("mj_mulJacVec", &mj_mulJacVec_wrapper);
   function("mj_mulM", &mj_mulM_wrapper);
@@ -13295,6 +13364,7 @@ EMSCRIPTEN_BINDINGS(mujoco_bindings) {
   function("mjs_setName", &mjs_setName_wrapper);
   function("mjs_setToAdhesion", &mjs_setToAdhesion_wrapper);
   function("mjs_setToCylinder", &mjs_setToCylinder_wrapper);
+  function("mjs_setToDCMotor", &mjs_setToDCMotor_wrapper);
   function("mjs_setToDamper", &mjs_setToDamper_wrapper);
   function("mjs_setToIntVelocity", &mjs_setToIntVelocity_wrapper);
   function("mjs_setToMotor", &mjs_setToMotor_wrapper);
@@ -13400,6 +13470,7 @@ EMSCRIPTEN_BINDINGS(mujoco_bindings) {
   function("mju_subFrom3", &mju_subFrom3_wrapper);
   function("mju_subQuat", &mju_subQuat_wrapper);
   function("mju_sum", &mju_sum_wrapper);
+  function("mju_sym2dense", &mju_sym2dense_wrapper);
   function("mju_symmetrize", &mju_symmetrize_wrapper);
   function("mju_transformSpatial", &mju_transformSpatial_wrapper);
   function("mju_transpose", &mju_transpose_wrapper);

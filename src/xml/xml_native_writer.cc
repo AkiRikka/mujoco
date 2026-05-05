@@ -141,6 +141,13 @@ void mjXWriter::OneFlex(XMLElement* elem, const mjCFlex* flex) {
   WriteAttrKey(elem, "flatskin", bool_map, 2, flex->flatskin, defflex.flatskin);
   WriteAttrInt(elem, "dim", flex->dim, defflex.dim);
   WriteAttrInt(elem, "group", flex->group, defflex.group);
+  WriteAttr(elem, "cellcount", 3, flex->spec.cellcount, defflex.spec.cellcount);
+  if (flex->spec.order != defflex.spec.order) {
+    string dof_str = "full";
+    if (flex->spec.order == 1) dof_str = "trilinear";
+    else if (flex->spec.order == 2) dof_str = "quadratic";
+    WriteAttrTxt(elem, "dof", dof_str);
+  }
 
   // data vectors
   if (!flex->get_vertbody().empty()) {
@@ -721,8 +728,12 @@ void mjXWriter::OneEquality(XMLElement* elem, const mjCEquality* equality, mjCDe
 
       case mjEQ_FLEX:
       case mjEQ_FLEXVERT:
+        WriteAttrTxt(elem, "flex", mjs_getString(equality->name1));
+        break;
+
       case mjEQ_FLEXSTRAIN:
         WriteAttrTxt(elem, "flex", mjs_getString(equality->name1));
+        WriteAttr(elem, "cell", 3, equality->data);
         break;
 
       default:
@@ -871,7 +882,7 @@ void mjXWriter::OneActuator(XMLElement* elem, const mjCActuator* actuator, mjCDe
   if (writingdefaults) {
     WriteAttrInt(elem, "actdim", actuator->actdim, def->Actuator().actdim);
   } else {
-    int default_actdim = actuator->dyntype == mjDYN_NONE ? 0 : 1;
+    int default_actdim = (actuator->dyntype != mjDYN_NONE && actuator->dyntype != mjDYN_DCMOTOR);
     WriteAttrInt(elem, "actdim", actuator->actdim, default_actdim);
   }
   WriteAttrKey(elem, "dyntype", dyn_map, dyn_sz, actuator->dyntype, def->Actuator().dyntype);
@@ -1082,7 +1093,7 @@ void mjXWriter::Option(XMLElement* root) {
     XMLElement* sub = InsertEnd(section, "flag");
 
 #define WRITEDSBL(NAME, MASK) \
-    if( model->option.disableflags & MASK ) \
+    if (model->option.disableflags & MASK) \
       WriteAttrKey(sub, NAME, enable_map, 2, 0);
     WRITEDSBL("constraint",     mjDSBL_CONSTRAINT)
     WRITEDSBL("equality",       mjDSBL_EQUALITY)
@@ -1103,16 +1114,16 @@ void mjXWriter::Option(XMLElement* root) {
     WRITEDSBL("autoreset",      mjDSBL_AUTORESET)
     WRITEDSBL("nativeccd",      mjDSBL_NATIVECCD)
     WRITEDSBL("island",         mjDSBL_ISLAND)
+    WRITEDSBL("multiccd",       mjDSBL_MULTICCD)
 #undef WRITEDSBL
 
 #define WRITEENBL(NAME, MASK) \
-    if( model->option.enableflags & MASK ) \
+    if (model->option.enableflags & MASK) \
       WriteAttrKey(sub, NAME, enable_map, 2, 1);
     WRITEENBL("override",       mjENBL_OVERRIDE)
     WRITEENBL("energy",         mjENBL_ENERGY)
     WRITEENBL("fwdinv",         mjENBL_FWDINV)
     WRITEENBL("invdiscrete",    mjENBL_INVDISCRETE)
-    WRITEENBL("multiccd",       mjENBL_MULTICCD)
     WRITEENBL("sleep",          mjENBL_SLEEP)
 #undef WRITEENBL
   }

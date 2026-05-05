@@ -27,6 +27,7 @@
 #include "engine/engine_collision_sdf.h"
 #include "engine/engine_core_constraint.h"
 #include "engine/engine_core_util.h"
+#include "engine/engine_inline.h"
 #include "engine/engine_macro.h"
 #include "engine/engine_memory.h"
 #include "engine/engine_sort.h"
@@ -37,7 +38,7 @@
 #include "engine/engine_util_spatial.h"
 
 
-// table of pair-wise collision functions
+// table of pairwise collision functions
 mjfCollision mjCOLLISIONFUNC[mjNGEOMTYPES][mjNGEOMTYPES] = {
   /*              PLANE  HFIELD  SPHERE            CAPSULE             ELLIPSOID         CYLINDER            BOX               MESH              SDF */
   /*PLANE     */ {0,     0,      mjc_PlaneSphere,  mjc_PlaneCapsule,   mjc_PlaneConvex,  mjc_PlaneCylinder,  mjc_PlaneBox,     mjc_PlaneConvex,  mjc_PlaneConvex},
@@ -54,6 +55,104 @@ mjfCollision mjCOLLISIONFUNC[mjNGEOMTYPES][mjNGEOMTYPES] = {
 
 
 //------------------------------------ utility functions ------------------------------------------
+
+
+// return the maximum number of contacts that can be generated between two geoms
+// if has_margin is -1, then the margin is pulled from the model, otherwise if has_margin > 0
+// indicates that the geoms have a positive margin
+int mj_maxContact(const mjModel* m, int g1, int g2, int has_margin) {
+  int type1 = m->geom_type[g1];
+  int type2 = m->geom_type[g2];
+
+  if (type1 == mjGEOM_SDF || type2 == mjGEOM_SDF) {
+    return m->opt.sdf_initpoints;
+  }
+
+  if (type1 == mjGEOM_HFIELD || type2 == mjGEOM_HFIELD) {
+    int type = (type1 == mjGEOM_HFIELD) ? type2 : type1;
+    return (type != mjGEOM_PLANE && type != mjGEOM_HFIELD) ? mjMAXCONPAIR : 0;
+  }
+
+  // spheres and ellipsoids always generate a single contact
+  if (type1 == mjGEOM_SPHERE || type1 == mjGEOM_ELLIPSOID ||
+      type2 == mjGEOM_SPHERE || type2 == mjGEOM_ELLIPSOID) {
+    return 1;
+  }
+
+  // box-box primitive collider
+  if (type1 == mjGEOM_BOX && type2 == mjGEOM_BOX) {
+    return 8;
+  }
+
+  // capsule-capsule primitive collider
+  if (type1 == mjGEOM_CAPSULE && type2 == mjGEOM_CAPSULE) {
+    return 2;
+  }
+
+  // capsule-box primitive collider
+  if ((type1 == mjGEOM_CAPSULE && type2 == mjGEOM_BOX) ||
+      (type1 == mjGEOM_BOX && type2 == mjGEOM_CAPSULE)) {
+    return 4;
+  }
+
+  // the remaining plane cases
+  if (type1 == mjGEOM_PLANE || type2 == mjGEOM_PLANE) {
+    int type = (type1 == mjGEOM_PLANE) ? type2 : type1;
+    switch (type) {
+      case mjGEOM_CAPSULE:
+        return 2;
+      case mjGEOM_CYLINDER:
+      case mjGEOM_BOX:
+        return 4;
+      case mjGEOM_MESH:
+        return 3;
+      default:
+        return 0;
+    }
+  }
+
+  int is_multiccd = !mjDISABLED(mjDSBL_MULTICCD);
+  if (!is_multiccd) {
+    return 1;
+  }
+
+  if (type1 == mjGEOM_CAPSULE || type2 == mjGEOM_CAPSULE ||
+      type1 == mjGEOM_CYLINDER || type2 == mjGEOM_CYLINDER) {
+    return 5;
+  }
+
+  if (mjDISABLED(mjDSBL_NATIVECCD)) {
+    return is_multiccd ? 5 : 1;  // mesh-mesh or mesh-box with libccd
+  }
+
+  // check margin from model
+  if (has_margin < 0) {
+    has_margin = 0;
+    if (mjENABLED(mjENBL_OVERRIDE)) {
+      has_margin = m->opt.o_margin > 0.0;
+    } else {
+      int npair = m->npair;
+      int ipair = -1;
+      for (int k=0; k < npair; k++) {
+        if ((m->pair_geom1[k] == g1 && m->pair_geom2[k] == g2) ||
+            (m->pair_geom1[k] == g2 && m->pair_geom2[k] == g1)) {
+            ipair = k;
+            break;
+          }
+        }
+
+      if (ipair > -1) {
+        has_margin = m->pair_margin[ipair] > 0.0;
+      } else {
+        has_margin = m->geom_margin[g1] > 0.0 || m->geom_margin[g2] > 0.0;
+      }
+    }
+  }
+
+  // 4 contacts for mesh-mesh or mesh-box without margins, 5 with margins
+  return has_margin ? 5 : 4;
+}
+
 
 // move arena pointer back to the end of the contact array
 static inline void resetArena(mjData* d) {
@@ -516,6 +615,7 @@ void mj_collision(const mjModel* m, mjData* d) {
       }
     }
   }
+  mj_freeStack(d);
 
   // finish merging predefined geom pairs
   for (; pairadr < npair; pairadr++) {
@@ -572,8 +672,6 @@ void mj_collision(const mjModel* m, mjData* d) {
 
   // end narrowphase and midphase timer
   TM_END(mjTIMER_COL_NARROW);
-
-  mj_freeStack(d);
   TM_END1(mjTIMER_POS_COLLISION);
 }
 
@@ -950,6 +1048,7 @@ static void makeAAMM(const mjModel* m, mjData* d,
                      mjtNum* x_max, mjtNum* y_max, mjtNum* z_max,
                      int bf, const mjtNum* frame) {
   mjtNum aamm[6];
+  mjtNum override_margin = mjENABLED(mjENBL_OVERRIDE) ? 0.5 * m->opt.o_margin : 0;
 
   // body
   if (bf < m->nbody) {
@@ -959,14 +1058,32 @@ static void makeAAMM(const mjModel* m, mjData* d,
     // process all body geoms (body is collidable, should have geoms)
     for (int i=0; i < body_geomnum; i++) {
       int geom = m->body_geomadr[body]+i;
-      mjtNum margin = mjENABLED(mjENBL_OVERRIDE) ? 0.5*m->opt.o_margin : m->geom_margin[geom];
+      mjtNum margin = override_margin ? override_margin : m->geom_margin[geom];
       mjtNum _aamm[6];
 
-      // set _aamm for this geom
+      const mjtNum* aabb = m->geom_aabb + 6*geom;
+      const mjtNum* size = m->geom_aabb + 6*geom + 3;
+      const mjtNum* xpos = d->geom_xpos + 3*geom;
+      const mjtNum* xmat = d->geom_xmat + 9*geom;
+
+      // compute center in global coordinates
+      mjtNum pos[3];
+      mji_mulMatVec3(pos, xmat, aabb);
+      mju_addTo3(pos, xpos);
+
+      mjtNum axis[9];
+      mji_transpose3(axis, xmat);
+      mjtNum r_half = m->geom_rbound[geom];
+
       for (int j=0; j < 3; j++) {
-        mjtNum cen = mju_dot3(d->geom_xpos+3*geom, frame+3*j);
-        _aamm[j]   = cen - m->geom_rbound[geom] - margin;
-        _aamm[j+3] = cen + m->geom_rbound[geom] + margin;
+        const mjtNum* frame_j = frame + 3*j;
+        mjtNum aabb_cen = mju_dot3(pos, frame_j);
+        mjtNum aabb_half = mju_abs(size[0] * mju_dot3(axis + 0, frame_j))
+                         + mju_abs(size[1] * mju_dot3(axis + 3, frame_j))
+                         + mju_abs(size[2] * mju_dot3(axis + 6, frame_j));
+        mjtNum r_cen = mju_dot3(xpos, frame_j);
+        _aamm[j + 0] = mju_max(r_cen - r_half, aabb_cen - aabb_half) - margin;
+        _aamm[j + 3] = mju_min(r_cen + r_half, aabb_cen + aabb_half) + margin;
       }
 
       // update body aamm
@@ -1007,7 +1124,7 @@ static void makeAAMM(const mjModel* m, mjData* d,
     }
 
     // correct for flex radius and margin
-    mjtNum margin = mjENABLED(mjENBL_OVERRIDE) ? 0.5*m->opt.o_margin : m->flex_margin[f];
+    mjtNum margin = override_margin ? override_margin : m->flex_margin[f];
     mjtNum bound = m->flex_radius[f] + margin;
     aamm[0] -= bound;
     aamm[1] -= bound;

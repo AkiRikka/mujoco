@@ -96,6 +96,8 @@ class mjCModel_ : public mjsElement {
   mjtSize nflexedge;       // number of edges in all flexes
   mjtSize nflexelem;       // number of elements in all flexes
   mjtSize nflexelemdata;   // number of element vertex ids in all flexes
+  mjtSize nflexstiffness;  // number of stiffness parameters in all flexes
+  mjtSize nflexbending;    // number of bending parameters in all flexes
   mjtSize nflexelemedge;   // number of element edges in all flexes
   mjtSize nflexshelldata;  // number of shell fragment vertex ids in all flexes
   mjtSize nflexevpair;     // number of element-vertex pairs in all flexes
@@ -326,6 +328,9 @@ class mjCModel : public mjCModel_, private mjSpec {
 
   // set attached flag
   void SetAttached(bool deepcopy) { attached_ |= !deepcopy; }
+
+  // check if model is attached
+  bool IsAttached() const { return attached_; }
 
   // check for repeated names in list
   void CheckRepeat(mjtObj type);

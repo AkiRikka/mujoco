@@ -14,6 +14,7 @@
 
 #include "experimental/filament/render_context_filament.h"
 
+#include <array>
 #include <cstdint>
 #include <cstring>
 
@@ -21,13 +22,13 @@
 #include <mujoco/mjrender.h>
 #include <mujoco/mjvisualize.h>
 #include <mujoco/mujoco.h>
-#include "experimental/filament/filament/filament_context.h"
+#include "experimental/filament/compat/mjr_filament_renderer.h"
 
 
 #if defined(TLS_FILAMENT_CONTEXT)
-static thread_local mujoco::FilamentContext* g_filament_context = nullptr;
+static thread_local mujoco::MjrFilamentRenderer* g_filament_context = nullptr;
 #else
-static mujoco::FilamentContext* g_filament_context = nullptr;
+static mujoco::MjrFilamentRenderer* g_filament_context = nullptr;
 #endif
 
 static void CheckFilamentContext() {
@@ -36,20 +37,113 @@ static void CheckFilamentContext() {
   }
 }
 
+template <int N>
+static void setf(float (&arr)[N], const std::array<float, N>& values) {
+  for (int i = 0; i < N; ++i) {
+    arr[i] = values[i];
+  }
+}
+
+
 extern "C" {
 
 void mjrf_defaultFilamentConfig(mjrFilamentConfig* config) {
   memset(config, 0, sizeof(mjrFilamentConfig));
 }
 
+void mjr_defaultTextureData(mjrTextureData* data) {
+  memset(data, 0, sizeof(mjrTextureData));
+}
+
+void mjr_defaultTextureConfig(mjrTextureConfig* config) {
+  memset(config, 0, sizeof(mjrTextureConfig));
+}
+
+void mjr_defaultMeshData(mjrMeshData* data) {
+  std::memset(data, 0, sizeof(mjrMeshData));
+}
+
+void mjr_defaultSceneParams(mjrSceneParams* params) {
+  params->enable_post_processing = true;
+  params->enable_reflections = true;
+  params->enable_shadows = true;
+  params->layer_mask = 0xff;
+  params->reflection_layer_mask = 0xff;
+}
+
+void mjr_defaultLightParams(mjrLightParams* params) {
+  params->type = mjLIGHT_POINT;
+  params->texture = nullptr;
+  params->color[0] = 0;
+  params->color[1] = 0;
+  params->color[2] = 0;
+  params->intensity = 0.0f;
+  params->cast_shadows = true;
+  params->range = 10.0f;
+  params->spot_cone_angle = 180.f;
+  params->bulb_radius = 0.0f;
+  params->shadow_map_size = 2048;
+  params->vsm_blur_width = 0.0f;
+}
+
+void mjr_defaultMaterialTextures(mjrMaterialTextures* textures) {
+  textures->color = nullptr;
+  textures->normal = nullptr;
+  textures->metallic = nullptr;
+  textures->roughness = nullptr;
+  textures->occlusion = nullptr;
+  textures->orm = nullptr;
+  textures->emissive = nullptr;
+  textures->reflection = nullptr;
+}
+
+void mjr_defaultMaterialParams(mjrMaterialParams* params) {
+  setf(params->color, {1.f, 1.f, 1.f, 1.f});
+  setf(params->segmentation_color, {1, 1, 1, 1});
+  setf(params->uv_scale, {1, 1, 1});
+  setf(params->uv_offset, {0, 0, 0});
+  setf(params->scissor, {0, 0, 0, 0});
+  params->emissive = -1.0f;
+  params->specular = -1.0f;
+  params->glossiness = -1.0f;
+  params->metallic = -1.0f;
+  params->roughness = -1.0f;
+  params->reflectance = 0.0f;
+  params->tex_uniform = false;
+  params->reflective = false;
+}
+
+void mjr_defaultRenderableParams(mjrRenderableParams* params) {
+  params->shading_model = mjSHADING_MODEL_SCENE_OBJECT;
+  params->cast_shadows = true;
+  params->receive_shadows = true;
+  params->layer_mask = 0x01;
+  params->priority = 4;
+  params->blend_order = 0;
+}
+
+void mjr_defaultRenderTargetConfig(mjrRenderTargetConfig* config) {
+  memset(config, 0, sizeof(mjrRenderTargetConfig));
+  config->color_format = mjPIXEL_FORMAT_RGBA8;
+  config->depth_format = mjPIXEL_FORMAT_DEPTH32F;
+}
+
+void mjr_defaultRenderRequest(mjrRenderRequest* request) {
+  memset(request, 0, sizeof(mjrRenderRequest));
+}
+
+void mjr_defaultReadPixelsRequest(mjrReadPixelsRequest* request) {
+  memset(request, 0, sizeof(mjrReadPixelsRequest));
+}
+
 void mjrf_makeFilamentContext(const mjModel* m, mjrContext* con,
-                             const mjrFilamentConfig* config) {
+                              const mjrFilamentConfig* config) {
   // TODO: Support multiple contexts and multiple threads. For now, we'll just
   // assume a single, global context.
   if (g_filament_context != nullptr) {
     mju_error("Context already exists!");
   }
-  g_filament_context = new mujoco::FilamentContext(config);
+  g_filament_context = new mujoco::MjrFilamentRenderer(config);
   g_filament_context->Init(m);
 }
 
@@ -58,7 +152,7 @@ void mjrf_defaultContext(mjrContext* con) {
 }
 
 void mjrf_makeContext(const mjModel* m, mjrContext* con, int fontscale) {
-  mjr_freeContext(con);
+  mjrf_freeContext(con);
   mjrFilamentConfig cfg;
   mjrf_defaultFilamentConfig(&cfg);
   cfg.width = m->vis.global.offwidth;
@@ -72,7 +166,7 @@ void mjrf_freeContext(mjrContext* con) {
     delete g_filament_context;
     g_filament_context = nullptr;
   }
-  mjr_defaultContext(con);
+  mjrf_defaultContext(con);
 }
 
 void mjrf_render(mjrRect viewport, mjvScene* scn, const mjrContext* con) {

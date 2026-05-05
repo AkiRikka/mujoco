@@ -91,6 +91,8 @@ static const char* const kDampedPendulumPath =
     "engine/testdata/derivative/damped_pendulum.xml";
 static const char* const kLinearPath =
     "engine/testdata/derivative/linear.xml";
+static const char* const kDCMotorPath =
+    "engine/testdata/derivative/dcmotor.xml";
 static const char* const kModelPath = "testdata/model.xml";
 
 // compare analytic and finite-difference d_smooth/d_qvel
@@ -99,9 +101,12 @@ TEST_F(DerivativeTest, SmoothDvel) {
   for (const char* local_path : {kEnergyConservingPendulumPath,
                                  kTumblingThinObjectPath,
                                  kDampedActuatorsPath,
-                                 kDamperActuatorsPath}) {
+                                 kDamperActuatorsPath,
+                                 kDCMotorPath}) {
     const std::string xml_path = GetTestDataFilePath(local_path);
-    mjModel* model = mj_loadXML(xml_path.c_str(), nullptr, nullptr, 0);
+    char error[1024] = "";
+    mjModel* model = mj_loadXML(xml_path.c_str(), nullptr, error, sizeof(error));
+    ASSERT_THAT(model, testing::NotNull()) << "Failed to load model: " << error;
     int nD = model->nD;
     mjData* data = mj_makeData(model);
 
@@ -315,17 +320,19 @@ TEST_F(DerivativeTest, PassiveDvel) {
       mj_forward(model, data);
 
       // get analytic derivatives
+      mju_zero(data->qDeriv, model->nD);
+      mjd_passive_vel(model, data);
       mju_copy(qDerivAnalytic, data->qDeriv, nD);
 
       // clear qDeriv, get finite-difference derivatives
       mju_zero(data->qDeriv, nD);
       mju_zero(qDerivFD, nD);
-      mjtNum eps = MjTol(1e-6, 1e-3);
+      mjtNum eps = MjTol(1e-6, 1e-4);
       mjd_passive_velFD(model, data, eps);
 
       // expect FD and analytic derivatives to be similar to tol precision
       EXPECT_THAT(AsVector(data->qDeriv, nD),
-                  Pointwise(MjNear(1e-4, 1e-3), AsVector(qDerivAnalytic, nD)));
+                  Pointwise(MjNear(1e-6, 1e-4), AsVector(qDerivAnalytic, nD)));
     }
 
     mju_free(qDerivFD);
@@ -758,9 +765,12 @@ TEST_F(DerivativeTest, DenseSparseRneEquivalent) {
   for (const char* local_path : {kEnergyConservingPendulumPath,
                                  kTumblingThinObjectPath,
                                  kDampedActuatorsPath,
-                                 kDamperActuatorsPath}) {
+                                 kDamperActuatorsPath,
+                                 kDCMotorPath}) {
     const std::string xml_path = GetTestDataFilePath(local_path);
-    mjModel* model = mj_loadXML(xml_path.c_str(), nullptr, nullptr, 0);
+    char error[1024] = "";
+    mjModel* model = mj_loadXML(xml_path.c_str(), nullptr, error, sizeof(error));
+    ASSERT_THAT(model, testing::NotNull()) << "Failed to load model: " << error;
     int nD = model->nD;
     mjtNum* qDeriv = (mjtNum*) mju_malloc(sizeof(mjtNum)*nD);
     mjData* data = mj_makeData(model);
@@ -1300,6 +1310,123 @@ TEST_F(DerivativeTest, ActearlyDerivative) {
   mj_deleteModel(m);
 }
 
+
+// verify stateful DC motor derivative matches analytical formula
+TEST_F(DerivativeTest, DCMotorStatefulDerivative) {
+  static constexpr char xml[] = R"(
+  <mujoco>
+    <option timestep="0.002"/>
+    <worldbody>
+      <body>
+        <joint name="j" type="slide"/>
+        <geom type="sphere" size="0.1" mass="1"/>
+      </body>
+    </worldbody>
+    <actuator>
+      <dcmotor name="dc" joint="j" motorconst="2.0" resistance="0.5"
+               inductance="0 0.001" input="position" controller="10 0 5"/>
+    </actuator>
+  </mujoco>
+  )";
+
+  char error[1024];
+  mjModel* m = LoadModelFromString(xml, error, sizeof(error));
+  ASSERT_THAT(m, NotNull()) << error;
+  mjData* d = mj_makeData(m);
+
+  // set nonzero velocity and ctrl
+  d->qvel[0] = 1.0;
+  d->ctrl[0] = 0.5;
+
+  // forward to compute act_dot, etc.
+  mj_forward(m, d);
+
+  // compute analytical derivatives
+  mjd_smooth_vel(m, d, /* flg_bias = */ 1);
+
+  // extract diagonal of qDeriv
+  mjtNum qDeriv_diag = d->qDeriv[m->D_rowadr[0] + m->D_rownnz[0] - 1];
+
+  // expected: K*(dVdw - K)*(1 - exp(-h/te))/R
+  // with K=2, R=0.5, te=0.001, h=0.002, kd=5, dVdw=-5
+  mjtNum K = 2.0, R = 0.5, te = 0.001, h = 0.002, kd = 5.0;
+  mjtNum expected = K * (-kd - K) * (1 - mju_exp(-h / te)) / R;
+  EXPECT_NEAR(qDeriv_diag, expected, 1e-10)
+      << "stateful DC motor derivative should match analytical formula";
+
+  mj_deleteData(d);
+  mj_deleteModel(m);
+}
+
+
+// verify that stateful DC motor derivative converges to stateless as te -> 0
+TEST_F(DerivativeTest, DCMotorStatefulConvergesToStateless) {
+  // stateless DC motor with position controller
+  static constexpr char xml_stateless[] = R"(
+  <mujoco>
+    <option timestep="0.002"/>
+    <worldbody>
+      <body>
+        <joint name="j" type="slide"/>
+        <geom type="sphere" size="0.1" mass="1"/>
+      </body>
+    </worldbody>
+    <actuator>
+      <dcmotor name="dc" joint="j" motorconst="1.0" resistance="1.0"
+               input="position" controller="10 0 5"/>
+    </actuator>
+  </mujoco>
+  )";
+
+  // stateful DC motor with very small te
+  static constexpr char xml_stateful[] = R"(
+  <mujoco>
+    <option timestep="0.002"/>
+    <worldbody>
+      <body>
+        <joint name="j" type="slide"/>
+        <geom type="sphere" size="0.1" mass="1"/>
+      </body>
+    </worldbody>
+    <actuator>
+      <dcmotor name="dc" joint="j" motorconst="1.0" resistance="1.0"
+               inductance="0 1e-8" input="position" controller="10 0 5"/>
+    </actuator>
+  </mujoco>
+  )";
+
+  char error[1024];
+  mjModel* m_sl = LoadModelFromString(xml_stateless, error, sizeof(error));
+  ASSERT_THAT(m_sl, NotNull()) << error;
+  mjData* d_sl = mj_makeData(m_sl);
+
+  mjModel* m_sf = LoadModelFromString(xml_stateful, error, sizeof(error));
+  ASSERT_THAT(m_sf, NotNull()) << error;
+  mjData* d_sf = mj_makeData(m_sf);
+
+  // set identical state
+  d_sl->qvel[0] = d_sf->qvel[0] = 1.0;
+  d_sl->ctrl[0] = d_sf->ctrl[0] = 0.5;
+
+  // forward and compute derivatives
+  mj_forward(m_sl, d_sl);
+  mj_forward(m_sf, d_sf);
+  mjd_smooth_vel(m_sl, d_sl, 1);
+  mjd_smooth_vel(m_sf, d_sf, 1);
+
+  // extract diagonals
+  mjtNum diag_sl = d_sl->qDeriv[m_sl->D_rowadr[0] + m_sl->D_rownnz[0] - 1];
+  mjtNum diag_sf = d_sf->qDeriv[m_sf->D_rowadr[0] + m_sf->D_rownnz[0] - 1];
+
+  EXPECT_NEAR(diag_sf, diag_sl, 1e-6)
+      << "stateful derivative should converge to stateless as te -> 0";
+
+  mj_deleteData(d_sf);
+  mj_deleteModel(m_sf);
+  mj_deleteData(d_sl);
+  mj_deleteModel(m_sl);
+}
+
 // Utility: Rotate flex grid
 void RotateFlexGrid(mjModel* model, mjData* data, const char* flex_name,
                     double angle) {
@@ -1344,6 +1471,17 @@ void RotateFlexGrid(mjModel* model, mjData* data, const char* flex_name,
       }
     }
   }
+}
+
+// Helper: assemble flex stiffness into dense matrix via banded addH
+// This wraps the banded API and converts to dense for test verification.
+static void addH_dense(mjModel* m, mjData* d, mjtNum* H_dense,
+                       const int* dof_indices, int ndof, mjtNum h) {
+  // use full bandwidth (ndof) for exact dense equivalence
+  std::vector<mjtNum> H_band(ndof * ndof, 0);
+  mjd_flexInterp_addH(m, d, H_band.data(), dof_indices, ndof, ndof, h);
+  // convert banded to dense (lower triangle), then symmetrize
+  mju_band2Dense(H_dense, H_band.data(), ndof, ndof, 0, 1);
 }
 
 // compare analytic and fin-diff d_qfrc_passive/d_qvel for flex interp
@@ -1398,7 +1536,7 @@ TEST_F(DerivativeTest, FlexInterpDerivatives) {
       for (int i = 0; i < nv; i++) dof_indices[i] = i;
 
       // assemble K into H
-      mjd_flexInterp_addH(model, data, H.data(), dof_indices.data(), nv, 1.0);
+      addH_dense(model, data, H.data(), dof_indices.data(), nv, 1.0);
 
       // restore damping
       model->flex_damping[0] = save_damping;
@@ -1491,10 +1629,10 @@ TEST_F(DerivativeTest, FlexInterpDerivatives) {
       for (int i = 0; i < nv; i++) dof_indices[i] = i;
 
       vector<mjtNum> H1(nv * nv, 0);
-      mjd_flexInterp_addH(model, data, H1.data(), dof_indices.data(), nv, 1.0);
+      addH_dense(model, data, H1.data(), dof_indices.data(), nv, 1.0);
 
       vector<mjtNum> H2(nv * nv, 0);
-      mjd_flexInterp_addH(model, data, H2.data(), dof_indices.data(), nv, 0.5);
+      addH_dense(model, data, H2.data(), dof_indices.data(), nv, 0.5);
 
       vector<mjtNum> D(nv * nv);
       for (int i = 0; i < nv * nv; i++) {
@@ -1568,8 +1706,7 @@ TEST_F(DerivativeTest, FlexInterpDerivativesDeformed) {
   for (int i = 0; i < nv; i++) dof_indices[i] = i;
 
   // h=1, damping=0 => adds K to H
-  mjd_flexInterp_addH(model, data, H_approx.data(), dof_indices.data(), nv,
-                      1.0);
+  addH_dense(model, data, H_approx.data(), dof_indices.data(), nv, 1.0);
 
   // 2. Compute Finite Difference Jacobian (Ground Truth)
   // qfrc_passive = -dV/dq
