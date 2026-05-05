@@ -35,10 +35,12 @@ __pycache__/
 # MuJoCo's default log file
 MUJOCO_LOG.TXT
 
+# CMake/GoogleTest discovery files
+test/cmake_test_discovery_*.json
+
 # Clang cache
 .cache/
 
 # JavaScript bindings build
 wasm/**/dist/
 **/node_modules/
-

@@ -113,6 +113,43 @@ target_link_libraries(
 )
 target_link_options(record PRIVATE ${MUJOCO_SAMPLE_LINK_OPTIONS})
 
+add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/../src/experimental/nelif
+                 ${CMAKE_BINARY_DIR}/src/experimental/nelif)
+
+add_executable(nelif_gbuffer nelif_gbuffer.cc)
+target_compile_options(nelif_gbuffer PUBLIC ${MUJOCO_SAMPLE_COMPILE_OPTIONS})
+target_compile_features(nelif_gbuffer PUBLIC cxx_std_17)
+target_link_libraries(
+  nelif_gbuffer
+  mujoco::mujoco
+  mujoco::nelif
+  glfw
+  Threads::Threads
+)
+target_link_options(nelif_gbuffer PRIVATE ${MUJOCO_SAMPLE_LINK_OPTIONS})
+
+add_executable(nelif_export_raw nelif_export_raw.cc)
+target_compile_options(nelif_export_raw PUBLIC ${MUJOCO_SAMPLE_COMPILE_OPTIONS})
+target_compile_features(nelif_export_raw PUBLIC cxx_std_17)
+target_link_libraries(
+  nelif_export_raw
+  mujoco::mujoco
+  mujoco::nelif
+  glfw
+  Threads::Threads
+)
+target_link_options(nelif_export_raw PRIVATE ${MUJOCO_SAMPLE_LINK_OPTIONS})
+
+add_executable(nelif_export_snapshot nelif_export_snapshot.cc)
+target_compile_options(nelif_export_snapshot PUBLIC ${MUJOCO_SAMPLE_COMPILE_OPTIONS})
+target_compile_features(nelif_export_snapshot PUBLIC cxx_std_17)
+target_link_libraries(
+  nelif_export_snapshot
+  mujoco::mujoco
+  Threads::Threads
+)
+target_link_options(nelif_export_snapshot PRIVATE ${MUJOCO_SAMPLE_LINK_OPTIONS})
+
 if(APPLE AND MUJOCO_BUILD_MACOS_FRAMEWORKS)
   embed_in_bundle(basic simulate)
   embed_in_bundle(compile simulate)

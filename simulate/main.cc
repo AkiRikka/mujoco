@@ -18,12 +18,15 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <iostream>
 #include <memory>
 #include <mutex>
 #include <new>
 #include <string>
+#include <system_error>
 #include <thread>
+#include <vector>
 
 #include <mujoco/mujoco.h>
 #include "glfw_adapter.h"
@@ -47,6 +50,7 @@ extern "C" {
 namespace {
 namespace mj = ::mujoco;
 namespace mju = ::mujoco::sample_util;
+namespace fs = std::filesystem;
 
 // constants
 const double syncMisalign = 0.1;        // maximum mis-alignment before re-sync (simulation seconds)
@@ -157,6 +161,110 @@ std::string getExecutableDir() {
   return "";
 }
 
+fs::path CanonicalOrAbsolute(const fs::path& path) {
+  std::error_code error;
+  fs::path canonical = fs::weakly_canonical(path, error);
+  if (!error) {
+    return canonical;
+  }
+
+  error.clear();
+  fs::path absolute = fs::absolute(path, error);
+  if (!error) {
+    return absolute.lexically_normal();
+  }
+
+  return path.lexically_normal();
+}
+
+bool HasPath(const std::vector<fs::path>& paths, const fs::path& candidate) {
+  const std::string key = candidate.string();
+  for (const fs::path& path : paths) {
+    if (path.string() == key) {
+      return true;
+    }
+  }
+  return false;
+}
+
+void AddPluginDirectory(std::vector<fs::path>* dirs, const fs::path& dir) {
+  if (!dirs || dir.empty()) {
+    return;
+  }
+
+  std::error_code error;
+  if (!fs::is_directory(dir, error)) {
+    return;
+  }
+
+  fs::path canonical = CanonicalOrAbsolute(dir);
+  if (!HasPath(*dirs, canonical)) {
+    dirs->push_back(canonical);
+  }
+}
+
+void LoadDecoderIfPresent(const fs::path& library, std::vector<fs::path>* loaded) {
+  if (!loaded) {
+    return;
+  }
+
+  std::error_code error;
+  if (!fs::is_regular_file(library, error)) {
+    return;
+  }
+
+  fs::path canonical = CanonicalOrAbsolute(library);
+  if (HasPath(*loaded, canonical)) {
+    return;
+  }
+
+  mj_loadPluginLibrary(canonical.string().c_str());
+  loaded->push_back(canonical);
+}
+
+void LoadMeshDecoderPlugins(const std::string& executable_dir) {
+  std::vector<fs::path> plugin_dirs;
+
+  if (const char* env_dir = std::getenv("MUJOCO_PLUGIN_DIR")) {
+    AddPluginDirectory(&plugin_dirs, env_dir);
+  }
+
+  if (!executable_dir.empty()) {
+    const fs::path exe_dir = CanonicalOrAbsolute(executable_dir);
+    AddPluginDirectory(&plugin_dirs, exe_dir / "../lib");
+  }
+
+  std::error_code error;
+  fs::path cwd = fs::current_path(error);
+  if (!error) {
+    cwd = CanonicalOrAbsolute(cwd);
+    AddPluginDirectory(&plugin_dirs, cwd / "mujoco/build/lib");
+    AddPluginDirectory(&plugin_dirs, cwd / "build/lib");
+  }
+
+#if defined(_WIN32) || defined(__CYGWIN__)
+  const char* decoder_libraries[] = {
+      "obj_decoder.dll", "stl_decoder.dll",
+      "libobj_decoder.dll", "libstl_decoder.dll",
+  };
+#elif defined(__APPLE__)
+  const char* decoder_libraries[] = {
+      "libobj_decoder.dylib", "libstl_decoder.dylib",
+  };
+#else
+  const char* decoder_libraries[] = {
+      "libobj_decoder.so", "libstl_decoder.so",
+  };
+#endif
+
+  std::vector<fs::path> loaded_libraries;
+  for (const fs::path& dir : plugin_dirs) {
+    for (const char* decoder_library : decoder_libraries) {
+      LoadDecoderIfPresent(dir / decoder_library, &loaded_libraries);
+    }
+  }
+}
+
 
 
 // scan for libraries in the plugin directory to load additional plugins
@@ -182,11 +290,12 @@ void scanPluginLibraries() {
   // ${EXECDIR} is the directory containing the simulate binary itself
   // MUJOCO_PLUGIN_DIR is the MUJOCO_PLUGIN_DIR preprocessor macro
   const std::string executable_dir = getExecutableDir();
+  LoadMeshDecoderPlugins(executable_dir);
   if (executable_dir.empty()) {
     return;
   }
 
-  const std::string plugin_dir = getExecutableDir() + sep + MUJOCO_PLUGIN_DIR;
+  const std::string plugin_dir = executable_dir + sep + MUJOCO_PLUGIN_DIR;
   mj_loadAllPluginLibraries(
       plugin_dir.c_str(), +[](const char* filename, int first, int count) {
         std::printf("Plugins registered by library '%s':\n", filename);
@@ -208,6 +317,17 @@ const char* Diverged(int disableflags, const mjData* d) {
     }
   }
   return nullptr;
+}
+
+void ResetNelifPoseKeyframeIfPresent(const mjModel* m, mjData* d) {
+  if (!m || !d) {
+    return;
+  }
+
+  const int keyid = mj_name2id(m, mjOBJ_KEY, "nelif_pose");
+  if (keyid >= 0) {
+    mj_resetDataKeyframe(m, d, keyid);
+  }
 }
 
 mjModel* LoadModel(const char* file, mj::Simulate& sim) {
@@ -300,6 +420,7 @@ void PhysicsLoop(mj::Simulate& sim) {
       mjData* dnew = nullptr;
       if (mnew) dnew = mj_makeData(mnew);
       if (dnew) {
+        ResetNelifPoseKeyframeIfPresent(mnew, dnew);
         sim.Load(mnew, dnew, sim.dropfilename);
 
         // lock the sim mutex
@@ -324,6 +445,7 @@ void PhysicsLoop(mj::Simulate& sim) {
       mjData* dnew = nullptr;
       if (mnew) dnew = mj_makeData(mnew);
       if (dnew) {
+        ResetNelifPoseKeyframeIfPresent(mnew, dnew);
         sim.Load(mnew, dnew, sim.filename);
 
         // lock the sim mutex
@@ -465,6 +587,7 @@ void PhysicsThread(mj::Simulate* sim, const char* filename) {
       const std::unique_lock<std::recursive_mutex> lock(sim->mtx);
 
       d = mj_makeData(m);
+      ResetNelifPoseKeyframeIfPresent(m, d);
     }
     if (d) {
       sim->Load(m, d, filename);

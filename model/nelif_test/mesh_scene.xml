@@ -1,0 +1,76 @@
+<mujoco model="nelif_mesh_test">
+  <compiler angle="degree"/>
+
+  <option timestep="0.01" gravity="0 0 -9.81"/>
+
+  <visual>
+    <global offwidth="512" offheight="512"/>
+    <quality shadowsize="2048" offsamples="0"/>
+    <headlight ambient="0 0 0" diffuse="0 0 0" specular="0 0 0"/>
+    <map znear="0.01" zfar="20"/>
+  </visual>
+
+  <asset>
+    <mesh name="pyramid_mesh"
+          vertex="-0.45 -0.35 0.00
+                   0.45 -0.35 0.00
+                   0.45  0.35 0.00
+                  -0.45  0.35 0.00
+                   0.00  0.00 0.70"
+          face="0 1 4
+                1 2 4
+                2 3 4
+                3 0 4
+                0 2 1
+                0 3 2"/>
+    <material name="mat_floor" rgba="0.55 0.56 0.58 1" specular="0.15" shininess="0.35"/>
+    <material name="mat_wall" rgba="0.70 0.72 0.76 1" specular="0.08" shininess="0.2"/>
+    <material name="mat_mesh" rgba="0.18 0.72 0.42 1" specular="0.35" shininess="0.55"/>
+    <material name="mat_box" rgba="0.88 0.25 0.14 1" specular="0.25" shininess="0.45"/>
+  </asset>
+
+  <worldbody>
+    <camera name="nelif_fixed_cam"
+            mode="fixed"
+            pos="2.4 -3.2 1.7"
+            xyaxes="0.800 0.600 0.000 -0.263 0.351 0.899"
+            fovy="45"/>
+
+    <light name="nelif_key_light"
+           mode="fixed"
+           type="spot"
+           castshadow="true"
+           pos="-1.4 -1.8 2.8"
+           dir="0.35 0.45 -1"
+           diffuse="1.0 0.94 0.86"
+           specular="0.45 0.45 0.45"
+           bulbradius="0.12"
+           cutoff="55"/>
+
+    <geom name="floor"
+          type="plane"
+          pos="0 0 0"
+          size="3 3 0.02"
+          material="mat_floor"/>
+
+    <geom name="back_wall"
+          type="box"
+          pos="0 1.25 1.0"
+          size="3.0 0.04 1.0"
+          material="mat_wall"/>
+
+    <body name="pyramid_body" pos="-0.85 -0.12 0.0" euler="0 0 18">
+      <geom name="green_pyramid"
+            type="mesh"
+            mesh="pyramid_mesh"
+            material="mat_mesh"/>
+    </body>
+
+    <body name="box_body" pos="0.82 0.18 0.24">
+      <geom name="red_box"
+            type="box"
+            size="0.25 0.25 0.24"
+            material="mat_box"/>
+    </body>
+  </worldbody>
+</mujoco>
