@@ -167,6 +167,8 @@ enum class Stage2Target : int {
   kDiffuseIndirectShading = 5,
   kSpecularIndirectShading = 6,
   kShading = 7,
+  kDiffuseDirectUnshadowed = 8,
+  kSpecularDirectUnshadowed = 9,
   kCount,
 };
 
@@ -235,6 +237,22 @@ static constexpr AttachmentContract kStage2TargetContract[kStage2TargetCount] = 
         "final path-traced radiance r",
         "final path-traced radiance g",
         "final path-traced radiance b",
+        "valid surface mask",
+    },
+    {
+        "DiffuseDirectUnshadowed",
+        "RGBA32F",
+        "unshadowed direct diffuse radiance r",
+        "unshadowed direct diffuse radiance g",
+        "unshadowed direct diffuse radiance b",
+        "valid surface mask",
+    },
+    {
+        "SpecularDirectUnshadowed",
+        "RGBA32F",
+        "unshadowed direct specular radiance r",
+        "unshadowed direct specular radiance g",
+        "unshadowed direct specular radiance b",
         "valid surface mask",
     },
 };

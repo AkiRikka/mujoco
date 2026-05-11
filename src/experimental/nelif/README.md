@@ -10,6 +10,7 @@
 - [gbuffer_pass.cc](/Users/aki/Projects/mujoco-pipeline/mujoco/src/experimental/nelif/gbuffer_pass.cc)
 - [screen_space_light_pass.h](/Users/aki/Projects/mujoco-pipeline/mujoco/src/experimental/nelif/screen_space_light_pass.h)
 - [screen_space_light_pass.cc](/Users/aki/Projects/mujoco-pipeline/mujoco/src/experimental/nelif/screen_space_light_pass.cc)
+- [onnx_backend.h](/Users/aki/Projects/mujoco-pipeline/mujoco/src/experimental/nelif/onnx_backend.h)
 
 ## 目标
 
@@ -315,6 +316,186 @@ cmake --build build --target nelif_export_raw
 - `smFlux.exr`
 - `manifest.json`
 
+#### 实时 runtime scaffold
+
+可用 sample：
+
+- [nelif_runtime.cc](/Users/aki/Projects/mujoco-pipeline/mujoco/sample/nelif_runtime.cc)
+- [runtime_pass.h](/Users/aki/Projects/mujoco-pipeline/mujoco/src/experimental/nelif/runtime_pass.h)
+- [runtime_pass.cc](/Users/aki/Projects/mujoco-pipeline/mujoco/src/experimental/nelif/runtime_pass.cc)
+- [onnx_backend.h](/Users/aki/Projects/mujoco-pipeline/mujoco/src/experimental/nelif/onnx_backend.h)
+- [onnx_backend.cc](/Users/aki/Projects/mujoco-pipeline/mujoco/src/experimental/nelif/onnx_backend.cc)
+
+编译和运行：
+
+```bash
+cd /Users/aki/Projects/mujoco-pipeline/mujoco
+cmake --build build --target nelif_runtime
+./build/bin/nelif_runtime model/nelif_test/gbuffer_scene.xml
+```
+
+窗口里：
+
+- `0`：MuJoCo 原始渲染
+- `1`：`RuntimeShading`
+- `2`：`RuntimeDirectUnshadowed`
+- `3`：`RuntimeDirectShadowed`
+- `4`：`PredShadow`
+- `5`：`PredIndirect`
+- `6`：`Position`
+- `7`：`Normal`
+- `8`：`ssLightDepth`
+- `9`：`ssLightVec`
+- `[` / `]`：调整显示 exposure
+- `D`：导出当前 runtime 输出 EXR
+
+第一版 runtime pass 的目标是先把实时渲染链路搭起来：
+
+```text
+GBufferPass + ScreenSpaceLightPass
+-> RuntimePass
+-> RuntimeDirectUnshadowed * PredShadow + PredIndirect
+-> RuntimeShading
+```
+
+当前 `RuntimeDirectUnshadowed` 是 GLSL 里的解析 direct baseline，对齐 Python `tools/nelif/inference/direct_from_raw.py` 的简化 Lambert + Blinn-Phong + distance attenuation 逻辑。不启用 ONNX backend 时，`PredShadow` 由 `ssLightDepth` 派生 hard/soft visibility，`PredIndirect` 是 0 stub；启用后，`PredShadow` 和 `PredIndirect` 分别来自 exported shadow / indirect ONNX model。
+
+ONNX backend 是可选编译项。Python `onnxruntime` wheel 通常只带 runtime 动态库，不带 C/C++ header；C++ sample 需要 ONNX Runtime C/C++ SDK：
+
+```bash
+cd /Users/aki/Projects/mujoco-pipeline/mujoco
+cmake -S . -B build \
+  -DMUJOCO_NELIF_ENABLE_ONNXRUNTIME=ON \
+  -DMUJOCO_NELIF_ONNXRUNTIME_ROOT=/path/to/onnxruntime-osx-arm64
+cmake --build build --target nelif_runtime
+```
+
+运行时传入 indirect 和 shadow ONNX：
+
+```bash
+./build/bin/nelif_runtime model/nelif_test/gbuffer_scene.xml \
+  --indirect-onnx ../tmp-res/export_runtime/indirect_v1_128.onnx \
+  --shadow-onnx ../tmp-res/export_runtime/shadow_v0_128.onnx \
+  --onnx-provider coreml \
+  --onnx-screen-size 128 \
+  --onnx-rsm-face-size 64
+```
+
+`--onnx-provider` 支持 `coreml`、`cuda`、`tensorrt` 和 `cpu`。在 macOS + ONNX Runtime arm64 SDK 上使用 `coreml`；在 NVIDIA Linux 机器上优先测试 `cuda`，之后再测试 `tensorrt`。`tensorrt` 会先注册 TensorRT EP，再注册 CUDA EP 作为 fallback。MPS 是 PyTorch backend，这条 C++ ONNX Runtime 路径不直接使用 MPS。`cpu` 只建议作为诊断/数值对照路径。
+
+当前 ONNX backend 是第一版对齐路径：CPU `glReadPixels/glGetTexImage` readback、固定 ONNX shape、ONNX inference、再上传 indirect / shadow texture 给 `RuntimePass` 采样。它用于确认 MuJoCo runtime tensor contract 和 Python exported model 能对齐，不代表最终实时性能方案。indirect 和 shadow 现在共用同一份 runtime input packing，避免每帧重复 readback/resize 同一批 G-buffer / RSM 输入。
+
+可以打开 runtime profiler 看每帧分阶段耗时：
+
+```bash
+./build/bin/nelif_runtime model/nelif_test/gbuffer_scene.xml \
+  --indirect-onnx ../tmp-res/export_runtime/indirect_v1_128_dynamo.onnx \
+  --shadow-onnx ../tmp-res/export_runtime/shadow_v0_128_dynamo.onnx \
+  --onnx-provider coreml \
+  --onnx-screen-size 128 \
+  --onnx-rsm-face-size 64 \
+  --profile-runtime \
+  --profile-warmup-frames 15 \
+  --exit-after-frames 90 \
+  --profile-output ../tmp-res/runtime_profile.json
+```
+
+输出示例字段：
+
+```text
+total / sim / scene / gbuffer / light / input_pack / indirect_onnx / shadow_onnx / upload / compose / draw / swap_poll
+```
+
+`input_pack` 是共享 runtime tensor 构造时间；`indirect_onnx` 和 `shadow_onnx` 是 ONNX Runtime 推理时间。当前应用端主要看 macOS `coreml` 和 Linux NVIDIA `cuda/tensorrt`；`cpu` 只用于确认数值或 provider fallback 问题。`--profile-output` 会写出 `nelif.runtime_profile.v1` JSON，适合脚本化比较；`--exit-after-frames` 用于自动结束 benchmark。
+
+批量 benchmark 可以用 Python 包装脚本：
+
+```bash
+python3 tools/nelif/inference/benchmark_runtime.py \
+  --indirect-onnx tmp-res/export_runtime/indirect_v1_128_dynamo.onnx \
+  --shadow-onnx tmp-res/export_runtime/shadow_v0_128_dynamo.onnx \
+  --provider coreml \
+  --screen-size 128 \
+  --output-dir tmp-res/runtime_benchmark_coreml
+```
+
+脚本默认跑 `gbuffer_scene.xml`、`table_ball_drop.xml`、`table_arm_spin.xml`，如果本机存在 `tmp-res/pilot32/sample_000000/scene/scene.xml` 也会加入训练分布样本。macOS 默认 provider 是 `coreml`；Linux 默认 provider 是 `cuda`。输出包括每个 run 的 `profile.json`、`stdout.txt`、`stderr.txt`、首帧 dump，以及汇总的 `metrics.json` / `summary.md`。当前 ONNX export 是固定 shape，所以 `--screen-size` 必须和导出的 ONNX 输入尺寸一致；要比较 64/96/128，需要分别导出对应尺寸的 ONNX。
+
+NVIDIA Linux 侧需要使用带 CUDA/TensorRT EP 的 ONNX Runtime C/C++ SDK，并确保 `libonnxruntime_providers_cuda.so` / `libonnxruntime_providers_tensorrt.so` 及 CUDA/cuDNN/TensorRT 动态库能被运行时加载。CUDA smoke：
+
+```bash
+python3 tools/nelif/inference/benchmark_runtime.py \
+  --indirect-onnx tmp-res/export_runtime/indirect_v1_128_dynamo.onnx \
+  --shadow-onnx tmp-res/export_runtime/shadow_v0_128_dynamo.onnx \
+  --provider cuda \
+  --screen-size 128 \
+  --output-dir tmp-res/runtime_benchmark_cuda
+```
+
+TensorRT smoke：
+
+```bash
+python3 tools/nelif/inference/benchmark_runtime.py \
+  --indirect-onnx tmp-res/export_runtime/indirect_v1_128_dynamo.onnx \
+  --shadow-onnx tmp-res/export_runtime/shadow_v0_128_dynamo.onnx \
+  --provider tensorrt \
+  --screen-size 128 \
+  --output-dir tmp-res/runtime_benchmark_tensorrt
+```
+
+更贴近训练分布的 runtime 场景可以直接加载已有 pilot sample：
+
+```bash
+./build/bin/nelif_runtime ../tmp-res/pilot32/sample_000000/scene/scene.xml \
+  --key nelif_pose \
+  --indirect-onnx ../tmp-res/export_runtime/indirect_v1_128_dynamo.onnx \
+  --shadow-onnx ../tmp-res/export_runtime/shadow_v0_128_dynamo.onnx \
+  --onnx-screen-size 128 \
+  --onnx-rsm-face-size 64 \
+  --face-size 512
+```
+
+动态 smoke 场景：
+
+```bash
+./build/bin/nelif_runtime model/nelif_test/table_ball_drop.xml \
+  --indirect-onnx ../tmp-res/export_runtime/indirect_v1_128_dynamo.onnx \
+  --shadow-onnx ../tmp-res/export_runtime/shadow_v0_128_dynamo.onnx \
+  --onnx-screen-size 128 \
+  --onnx-rsm-face-size 64 \
+  --face-size 512
+
+./build/bin/nelif_runtime model/nelif_test/table_arm_spin.xml \
+  --key spin \
+  --indirect-onnx ../tmp-res/export_runtime/indirect_v1_128_dynamo.onnx \
+  --shadow-onnx ../tmp-res/export_runtime/shadow_v0_128_dynamo.onnx \
+  --onnx-screen-size 128 \
+  --onnx-rsm-face-size 64 \
+  --face-size 512
+```
+
+可以用首帧导出做 smoke：
+
+```bash
+./build/bin/nelif_runtime model/nelif_test/gbuffer_scene.xml \
+  --dump-first-frame \
+  --exit-after-dump \
+  --output-dir /Users/aki/Projects/mujoco-pipeline/tmp-res/nelif_runtime_smoke \
+  --width 512 \
+  --height 512 \
+  --face-size 128
+```
+
+输出：
+
+```text
+RuntimeDirectUnshadowed.exr
+RuntimeDirectShadowed.exr
+PredIndirectStub.exr 或 PredIndirectShading.exr
+PredShadow.exr
+RuntimeShading.exr
+```
+
 `manifest.json` 会记录这次导出的关键 metadata：
 
 - 实际使用的 camera
@@ -403,7 +584,7 @@ cd /Users/aki/Projects/mujoco-pipeline
 
 ## 已知限制
 
-当前这条 raw input 链路仍然是最小可用版本，不是完整 NeLiF 复现。
+当前这条 raw/runtime 链路仍然是最小可用版本，不是完整 NeLiF 复现。
 
 已知限制包括：
 
@@ -413,6 +594,8 @@ cd /Users/aki/Projects/mujoco-pipeline
 - `smFlux` 是解析近似，不是 path-traced flux
 - `Reflect / Gloss` 仍是 MuJoCo 材质到简化 PBR 参数的工程映射
 - `ssLightDepth` 目前只把 raw depth clue 导出来，后续 tensor packing 才会再构造 delta / ratio / hard shadow
+- C++ runtime 里的 ONNX indirect/shadow backend 已有第一版 CPU/readback scaffold；未启用 ONNX Runtime C/C++ SDK 时仍退回 `PredIndirectStub = 0` 和解析 shadow
+- C++ runtime 里的 direct 是解析 baseline，还不是 direct neural decoder
 - mesh 支持 compiled geometry，但不支持 texture / UV / per-face material 的完整导出
 
 ## 现在这条链路的定位
@@ -422,8 +605,8 @@ cd /Users/aki/Projects/mujoco-pipeline
 它的定位是：
 
 1. 固定 MuJoCo 侧 stage 2 输入契约
-2. 提供可导出的 raw EXR 数据
-3. 给后续 Blender/Cycles GT 对齐、训练和 runtime inference 提供稳定输入
+2. 提供可导出的 raw/runtime EXR 数据
+3. 给 Blender/Cycles GT 对齐、训练和 C++ neural backend 接入提供稳定输入和显示路径
 
 ## 后续实现思路：Paired Data Pipeline
 
@@ -460,6 +643,8 @@ sample_000001/
     IndirectShading.exr
     DiffuseDirectShading.exr
     SpecularDirectShading.exr
+    DiffuseDirectUnshadowed.exr
+    SpecularDirectUnshadowed.exr
     DiffuseIndirectShading.exr
     SpecularIndirectShading.exr
   snapshot/
@@ -597,6 +782,7 @@ python3 tools/nelif/export_dataset.py \
 - light brightness / emission_rgb 是否一致
 - `light-energy-scale` 是否让 GT 的亮度落在合理范围
 - `DirectShading.exr` 是否确实是无遮挡 direct result
+- `DiffuseDirectUnshadowed.exr` / `SpecularDirectUnshadowed.exr` 是否相加等于 `DirectShading.exr`
 - `DirectShadowShading.exr` 是否保留了 Cycles 阴影
 - `ssLightDepth_delta.exr` 的阴影团是否和 GT shadow 大致对应
 

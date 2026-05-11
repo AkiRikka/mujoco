@@ -1,0 +1,46 @@
+<mujoco model="nelif_table_ball_drop">
+  <compiler angle="radian" autolimits="true"/>
+  <option timestep="0.005" gravity="0 0 -9.81"/>
+
+  <visual>
+    <global offwidth="512" offheight="512"/>
+    <quality shadowsize="2048" offsamples="0"/>
+    <headlight ambient="0 0 0" diffuse="0 0 0" specular="0 0 0"/>
+    <map znear="0.01" zfar="20"/>
+  </visual>
+
+  <asset>
+    <material name="floor" rgba="0.31 0.38 0.36 1" specular="0.10" shininess="0.25"/>
+    <material name="wall" rgba="0.73 0.70 0.65 1" specular="0.10" shininess="0.25"/>
+    <material name="table" rgba="0.58 0.60 0.52 1" specular="0.12" shininess="0.30"/>
+    <material name="dark" rgba="0.09 0.15 0.14 1" specular="0.22" shininess="0.35"/>
+    <material name="ball" rgba="0.90 0.32 0.12 1" specular="0.28" shininess="0.55"/>
+    <material name="blue" rgba="0.22 0.35 0.82 1" specular="0.18" shininess="0.42"/>
+    <material name="green" rgba="0.22 0.62 0.36 1" specular="0.16" shininess="0.36"/>
+  </asset>
+
+  <worldbody>
+    <camera name="nelif_fixed_cam" mode="fixed" pos="-1.65 0.52 1.65"
+            xyaxes="0.19 -0.982 0 0.38 0.073 0.922" fovy="68"/>
+    <light name="nelif_key_light" mode="fixed" type="point" castshadow="true"
+           pos="-0.55 0.95 2.45" dir="0.28 -0.12 -0.95"
+           diffuse="0.94 0.91 0.88" specular="0.45 0.45 0.45"
+           intensity="0.95" bulbradius="0.22" cutoff="55"/>
+
+    <geom name="floor" type="plane" pos="0 0 0" size="3 3 0.02" material="floor"/>
+    <geom name="back_wall" type="box" pos="0 1.45 1.5" size="1.45 0.025 1.5" material="wall"/>
+    <geom name="right_wall" type="box" pos="1.05 0.72 1.5" size="0.025 0.95 1.5" material="wall"/>
+    <geom name="table_top" type="box" pos="0 0.78 0.765" size="0.50 0.56 0.015" material="table"/>
+    <geom name="table_leg_00" type="box" pos="-0.45 0.26 0.375" size="0.018 0.018 0.375" material="dark"/>
+    <geom name="table_leg_01" type="box" pos="-0.45 1.30 0.375" size="0.018 0.018 0.375" material="dark"/>
+    <geom name="table_leg_10" type="box" pos="0.45 0.26 0.375" size="0.018 0.018 0.375" material="dark"/>
+    <geom name="table_leg_11" type="box" pos="0.45 1.30 0.375" size="0.018 0.018 0.375" material="dark"/>
+    <geom name="blue_block" type="box" pos="-0.18 0.86 0.82" size="0.045 0.045 0.04" material="blue" quat="0.985 0 0 0.174"/>
+    <geom name="green_block" type="box" pos="0.22 1.02 0.82" size="0.04 0.05 0.035" material="green" quat="0.966 0 0 -0.259"/>
+
+    <body name="falling_ball" pos="0.08 0.72 1.42">
+      <freejoint/>
+      <geom name="falling_ball_geom" type="sphere" size="0.055" material="ball" mass="0.08"/>
+    </body>
+  </worldbody>
+</mujoco>

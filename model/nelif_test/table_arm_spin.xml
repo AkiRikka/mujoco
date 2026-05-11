@@ -1,0 +1,62 @@
+<mujoco model="nelif_table_arm_spin">
+  <compiler angle="radian" autolimits="true"/>
+  <option timestep="0.005" gravity="0 0 -9.81"/>
+
+  <visual>
+    <global offwidth="512" offheight="512"/>
+    <quality shadowsize="2048" offsamples="0"/>
+    <headlight ambient="0 0 0" diffuse="0 0 0" specular="0 0 0"/>
+    <map znear="0.01" zfar="20"/>
+  </visual>
+
+  <default>
+    <joint damping="0.05"/>
+  </default>
+
+  <asset>
+    <material name="floor" rgba="0.31 0.38 0.36 1" specular="0.10" shininess="0.25"/>
+    <material name="wall" rgba="0.73 0.70 0.65 1" specular="0.10" shininess="0.25"/>
+    <material name="table" rgba="0.58 0.60 0.52 1" specular="0.12" shininess="0.30"/>
+    <material name="dark" rgba="0.09 0.15 0.14 1" specular="0.22" shininess="0.35"/>
+    <material name="robot" rgba="0.72 0.75 0.74 1" specular="0.28" shininess="0.58"/>
+    <material name="red" rgba="0.82 0.30 0.14 1" specular="0.18" shininess="0.40"/>
+    <material name="blue" rgba="0.22 0.35 0.82 1" specular="0.18" shininess="0.42"/>
+  </asset>
+
+  <worldbody>
+    <camera name="nelif_fixed_cam" mode="fixed" pos="-1.62 0.58 1.62"
+            xyaxes="0.18 -0.984 0 0.37 0.068 0.926" fovy="68"/>
+    <light name="nelif_key_light" mode="fixed" type="point" castshadow="true"
+           pos="-0.55 0.98 2.45" dir="0.30 -0.13 -0.94"
+           diffuse="0.94 0.91 0.88" specular="0.45 0.45 0.45"
+           intensity="0.95" bulbradius="0.22" cutoff="55"/>
+
+    <geom name="floor" type="plane" pos="0 0 0" size="3 3 0.02" material="floor"/>
+    <geom name="back_wall" type="box" pos="0 1.45 1.5" size="1.45 0.025 1.5" material="wall"/>
+    <geom name="right_wall" type="box" pos="1.05 0.72 1.5" size="0.025 0.95 1.5" material="wall"/>
+    <geom name="table_top" type="box" pos="0 0.78 0.765" size="0.50 0.56 0.015" material="table"/>
+    <geom name="table_leg_00" type="box" pos="-0.45 0.26 0.375" size="0.018 0.018 0.375" material="dark"/>
+    <geom name="table_leg_01" type="box" pos="-0.45 1.30 0.375" size="0.018 0.018 0.375" material="dark"/>
+    <geom name="table_leg_10" type="box" pos="0.45 0.26 0.375" size="0.018 0.018 0.375" material="dark"/>
+    <geom name="table_leg_11" type="box" pos="0.45 1.30 0.375" size="0.018 0.018 0.375" material="dark"/>
+    <geom name="red_block" type="box" pos="-0.24 1.00 0.82" size="0.04 0.04 0.04" material="red" quat="0.985 0 0 0.174"/>
+    <geom name="blue_block" type="box" pos="0.27 0.98 0.82" size="0.045 0.04 0.035" material="blue" quat="0.966 0 0 -0.259"/>
+
+    <body name="arm_base" pos="-0.06 0.72 0.83">
+      <geom name="base" type="cylinder" size="0.07 0.025" material="dark"/>
+      <body name="link1" pos="0 0 0.05">
+        <joint name="shoulder" type="hinge" axis="0 0 1"/>
+        <geom name="link1_geom" type="capsule" fromto="0 0 0 0.28 0 0.06" size="0.035" material="robot"/>
+        <body name="link2" pos="0.28 0 0.06">
+          <joint name="elbow" type="hinge" axis="0 0 1"/>
+          <geom name="link2_geom" type="capsule" fromto="0 0 0 0.22 0 0.03" size="0.028" material="robot"/>
+          <geom name="wrist" type="sphere" pos="0.24 0 0.03" size="0.035" material="dark"/>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+
+  <keyframe>
+    <key name="spin" qpos="0 0.7" qvel="1.6 -1.1"/>
+  </keyframe>
+</mujoco>
