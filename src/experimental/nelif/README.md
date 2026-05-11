@@ -377,6 +377,7 @@ cmake --build build --target nelif_runtime
   --indirect-onnx ../tmp-res/export_runtime/indirect_v1_128.onnx \
   --shadow-onnx ../tmp-res/export_runtime/shadow_v0_128.onnx \
   --onnx-provider coreml \
+  --onnx-input-staging cpu \
   --onnx-screen-size 128 \
   --onnx-rsm-face-size 64
 ```
@@ -406,7 +407,9 @@ cmake --build build --target nelif_runtime
 total / sim / scene / gbuffer / light / input_pack / indirect_onnx / shadow_onnx / upload / compose / draw / swap_poll
 ```
 
-`input_pack` 是共享 runtime tensor 构造时间；`profile.json` 还会写出 `input_pack_breakdown_ms`，拆成 `gbuffer_read`、`gbuffer_resize`、`screen_read`、`screen_resize`、`light_read`、`light_downsample`、`light_mask` 和 `finalize`。`indirect_onnx` 和 `shadow_onnx` 是 ONNX Runtime 推理时间。当前应用端主要看 macOS `coreml` 和 Linux NVIDIA `cuda/tensorrt`；`cpu` 只用于确认数值或 provider fallback 问题。`--profile-output` 会写出 `nelif.runtime_profile.v1` JSON，适合脚本化比较；`--exit-after-frames` 用于自动结束 benchmark。
+`--onnx-input-staging cpu|gpu` 控制 runtime tensor 的输入准备路径。`cpu` 是原始对齐路径：读回完整 texture 后在 CPU resize/downsample；`gpu` 会先用 OpenGL staging/blit 把 screen 和 light atlas 降到 ONNX 尺寸，再读回小图。`gpu` 路径是当前第一步性能优化，适合和 `cpu` 路径做 benchmark 对比。
+
+`input_pack` 是共享 runtime tensor 构造时间；`profile.json` 还会写出 `input_pack_breakdown_ms`，拆成 `gbuffer_read`、`gbuffer_resize`、`screen_read`、`screen_resize`、`light_read`、`light_downsample`、`light_mask` 和 `finalize`。`indirect_onnx` 和 `shadow_onnx` 是 ONNX Runtime 推理时间。当前应用端主要看 macOS `coreml` 和 Linux NVIDIA `cuda/tensorrt`；`cpu` provider 只用于确认数值或 provider fallback 问题。`--profile-output` 会写出 `nelif.runtime_profile.v1` JSON，适合脚本化比较；`--exit-after-frames` 用于自动结束 benchmark。
 
 批量 benchmark 可以用 Python 包装脚本：
 

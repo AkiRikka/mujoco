@@ -99,6 +99,7 @@ std::optional<std::string> indirect_onnx_path;
 std::optional<std::string> shadow_onnx_path;
 std::optional<std::filesystem::path> output_root;
 std::optional<std::filesystem::path> profile_output;
+bool onnx_gpu_staging = false;
 
 double ElapsedMs(TimePoint start, TimePoint end) {
   return std::chrono::duration<double, std::milli>(end - start).count();
@@ -282,6 +283,7 @@ void PrintUsage() {
       "[--diffuse-scale v] [--specular-scale v] [--exposure v] "
       "[--indirect-onnx path] [--shadow-onnx path] "
       "[--onnx-provider cpu|coreml|cuda|tensorrt] "
+      "[--onnx-input-staging cpu|gpu] "
       "[--onnx-screen-size px] [--onnx-screen-width px] "
       "[--onnx-screen-height px] [--onnx-rsm-face-size px] [--onnx-max-scale r g b] "
       "[--profile-runtime] [--profile-warmup-frames n] [--profile-output path] "
@@ -356,6 +358,19 @@ bool ParseArgs(int argc, const char** argv) {
       const std::string provider = std::string(argv[++i]);
       indirect_config.execution_provider = provider;
       shadow_config.execution_provider = provider;
+    } else if (!std::strcmp(argv[i], "--onnx-input-staging")) {
+      if (i + 1 >= argc) {
+        return false;
+      }
+      const char* value = argv[++i];
+      if (!std::strcmp(value, "cpu")) {
+        onnx_gpu_staging = false;
+      } else if (!std::strcmp(value, "gpu")) {
+        onnx_gpu_staging = true;
+      } else {
+        std::fprintf(stderr, "Invalid --onnx-input-staging value: %s\n", value);
+        return false;
+      }
     } else if (!std::strcmp(argv[i], "--onnx-screen-size")) {
       int size = 0;
       if (i + 1 >= argc || !ParseIntFlagValue(argv[++i], &size)) {
@@ -420,6 +435,8 @@ bool ParseArgs(int argc, const char** argv) {
       return false;
     }
   }
+  indirect_config.use_gpu_staging = onnx_gpu_staging;
+  shadow_config.use_gpu_staging = onnx_gpu_staging;
   return true;
 }
 
@@ -500,6 +517,8 @@ bool WriteProfileJson(const std::filesystem::path& path, int framebuffer_width,
   out << "  \"onnx_screen_size\": [" << indirect_config.screen_width << ", "
       << indirect_config.screen_height << "],\n";
   out << "  \"onnx_rsm_face_size\": " << indirect_config.rsm_face_size << ",\n";
+  out << "  \"onnx_input_staging\": \""
+      << (onnx_gpu_staging ? "gpu" : "cpu") << "\",\n";
   out << "  \"indirect_onnx\": \"" << JsonEscape(indirect_onnx_path.value_or("")) << "\",\n";
   out << "  \"shadow_onnx\": \"" << JsonEscape(shadow_onnx_path.value_or("")) << "\",\n";
   out << "  \"indirect_enabled\": " << JsonBool(indirect_backend.IsEnabled()) << ",\n";

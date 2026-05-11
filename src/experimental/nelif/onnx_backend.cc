@@ -14,6 +14,10 @@
 #define MUJOCO_NELIF_HAS_ONNXRUNTIME 0
 #endif
 
+#ifndef GL_RGBA32F
+#define GL_RGBA32F 0x8814
+#endif
+
 #if MUJOCO_NELIF_HAS_ONNXRUNTIME
 #include <onnxruntime_cxx_api.h>
 #endif
@@ -34,6 +38,102 @@ void AddInputElapsed(double* total, InputTimePoint start) {
   if (total) {
     *total += InputElapsedMs(start, InputClock::now());
   }
+}
+
+class RgbaReadbackStager {
+ public:
+  bool Read(GLuint source_texture, int source_width, int source_height,
+            int target_width, int target_height, GLenum filter,
+            std::vector<float>* rgba) {
+    if (!source_texture || source_width <= 0 || source_height <= 0 ||
+        target_width <= 0 || target_height <= 0 || !rgba) {
+      return false;
+    }
+    Ensure(target_width, target_height);
+
+    rgba->assign(static_cast<size_t>(target_width) * target_height * 4, 0.0f);
+
+    GLint previous_read_fbo = 0;
+    GLint previous_draw_fbo = 0;
+    GLint previous_texture = 0;
+    glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &previous_read_fbo);
+    glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &previous_draw_fbo);
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &previous_texture);
+
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, read_fbo_);
+    glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                           GL_TEXTURE_2D, source_texture, 0);
+    glReadBuffer(GL_COLOR_ATTACHMENT0);
+
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, draw_fbo_);
+    glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                           GL_TEXTURE_2D, staging_texture_, 0);
+    GLenum draw_buffer = GL_COLOR_ATTACHMENT0;
+    glDrawBuffers(1, &draw_buffer);
+
+    if (glCheckFramebufferStatus(GL_READ_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE ||
+        glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+      Restore(previous_read_fbo, previous_draw_fbo, previous_texture);
+      return false;
+    }
+
+    glBlitFramebuffer(0, 0, source_width, source_height,
+                      0, 0, target_width, target_height,
+                      GL_COLOR_BUFFER_BIT, filter);
+
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, draw_fbo_);
+    glReadBuffer(GL_COLOR_ATTACHMENT0);
+    glReadPixels(0, 0, target_width, target_height, GL_RGBA, GL_FLOAT, rgba->data());
+
+    const GLenum error = glGetError();
+    Restore(previous_read_fbo, previous_draw_fbo, previous_texture);
+    return error == GL_NO_ERROR;
+  }
+
+ private:
+  void Ensure(int width, int height) {
+    if (!read_fbo_) {
+      glGenFramebuffers(1, &read_fbo_);
+    }
+    if (!draw_fbo_) {
+      glGenFramebuffers(1, &draw_fbo_);
+    }
+    if (staging_texture_ && width == width_ && height == height_) {
+      return;
+    }
+    if (!staging_texture_) {
+      glGenTextures(1, &staging_texture_);
+    }
+    width_ = width;
+    height_ = height;
+    glBindTexture(GL_TEXTURE_2D, staging_texture_);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, width_, height_, 0,
+                 GL_RGBA, GL_FLOAT, nullptr);
+  }
+
+  void Restore(GLint read_fbo, GLint draw_fbo, GLint texture) {
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, static_cast<GLuint>(read_fbo));
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, static_cast<GLuint>(draw_fbo));
+    glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(texture));
+  }
+
+  GLuint read_fbo_ = 0;
+  GLuint draw_fbo_ = 0;
+  GLuint staging_texture_ = 0;
+  int width_ = 0;
+  int height_ = 0;
+};
+
+bool ReadTextureResizedRGBA32F(GLuint texture, int source_width, int source_height,
+                               int target_width, int target_height, GLenum filter,
+                               std::vector<float>* rgba) {
+  static thread_local RgbaReadbackStager stager;
+  return stager.Read(texture, source_width, source_height,
+                     target_width, target_height, filter, rgba);
 }
 
 float ClampFloat(float value, float lo, float hi) {
@@ -593,6 +693,196 @@ bool BuildRuntimeInputBuffers(const GBufferPass& gbuffer,
   return true;
 }
 
+bool BuildRuntimeInputBuffersGpuStaging(const GBufferPass& gbuffer,
+                                        const ScreenSpaceLightPass& screen_space_light,
+                                        const float camera_pos[3],
+                                        const OnnxIndirectConfig& config,
+                                        OnnxRuntimeInputs* out,
+                                        std::string* error,
+                                        OnnxRuntimeInputTiming* timing) {
+  if (timing) {
+    *timing = OnnxRuntimeInputTiming();
+  }
+  const int screen_w = config.screen_width;
+  const int screen_h = config.screen_height;
+  const int rsm_face = config.rsm_face_size;
+  const int rsm_w = rsm_face;
+  const int rsm_h = rsm_face * 6;
+
+  if (screen_w <= 0 || screen_h <= 0 || rsm_face <= 0) {
+    if (error) {
+      *error = "Invalid ONNX runtime input dimensions.";
+    }
+    return false;
+  }
+
+  std::vector<float> rgba;
+  std::vector<float> position_rgba;
+
+  auto read_gbuffer = [&](GBufferAttachment attachment, int index, bool scalar,
+                          int channel = 0) -> bool {
+    InputTimePoint stage_start = InputClock::now();
+    if (!ReadTextureResizedRGBA32F(gbuffer.Texture(attachment), gbuffer.width(),
+                                   gbuffer.height(), screen_w, screen_h,
+                                   GL_LINEAR, &rgba)) {
+      return false;
+    }
+    AddInputElapsed(timing ? &timing->gbuffer_read_ms : nullptr, stage_start);
+    stage_start = InputClock::now();
+    if (scalar) {
+      ResizeScalarTopOrigin(rgba, screen_w, screen_h, screen_w, screen_h,
+                            channel, &out->buffers[index]);
+    } else {
+      ResizeRgbTopOrigin(rgba, screen_w, screen_h, screen_w, screen_h,
+                         &out->buffers[index]);
+    }
+    AddInputElapsed(timing ? &timing->gbuffer_resize_ms : nullptr, stage_start);
+    return true;
+  };
+
+  auto read_screen = [&](ScreenSpaceLightAttachment attachment, int index, bool scalar,
+                         int channel = 0) -> bool {
+    InputTimePoint stage_start = InputClock::now();
+    if (!ReadTextureResizedRGBA32F(screen_space_light.Texture(attachment),
+                                   screen_space_light.width(),
+                                   screen_space_light.height(), screen_w, screen_h,
+                                   GL_LINEAR, &rgba)) {
+      return false;
+    }
+    AddInputElapsed(timing ? &timing->screen_read_ms : nullptr, stage_start);
+    stage_start = InputClock::now();
+    if (scalar) {
+      ResizeScalarTopOrigin(rgba, screen_w, screen_h, screen_w, screen_h,
+                            channel, &out->buffers[index]);
+    } else {
+      ResizeRgbTopOrigin(rgba, screen_w, screen_h, screen_w, screen_h,
+                         &out->buffers[index]);
+    }
+    AddInputElapsed(timing ? &timing->screen_resize_ms : nullptr, stage_start);
+    return true;
+  };
+
+  InputTimePoint stage_start = InputClock::now();
+  if (!ReadTextureResizedRGBA32F(gbuffer.Texture(GBufferAttachment::kPosition),
+                                 gbuffer.width(), gbuffer.height(),
+                                 screen_w, screen_h, GL_LINEAR, &position_rgba)) {
+    if (error) {
+      *error = "Failed to stage Position attachment.";
+    }
+    return false;
+  }
+  AddInputElapsed(timing ? &timing->gbuffer_read_ms : nullptr, stage_start);
+  stage_start = InputClock::now();
+  ResizeRgbTopOrigin(position_rgba, screen_w, screen_h, screen_w, screen_h,
+                     &out->buffers[0]);
+  AddInputElapsed(timing ? &timing->gbuffer_resize_ms : nullptr, stage_start);
+
+  if (!read_gbuffer(GBufferAttachment::kNormal, 1, false) ||
+      !read_gbuffer(GBufferAttachment::kOutDir, 2, false) ||
+      !read_gbuffer(GBufferAttachment::kDiffuse, 3, false) ||
+      !read_gbuffer(GBufferAttachment::kReflect, 4, false)) {
+    if (error) {
+      *error = "Failed to stage G-buffer RGB attachment.";
+    }
+    return false;
+  }
+
+  stage_start = InputClock::now();
+  if (!ReadTextureResizedRGBA32F(gbuffer.Texture(GBufferAttachment::kGloss),
+                                 gbuffer.width(), gbuffer.height(),
+                                 screen_w, screen_h, GL_LINEAR, &rgba)) {
+    if (error) {
+      *error = "Failed to stage Gloss attachment.";
+    }
+    return false;
+  }
+  AddInputElapsed(timing ? &timing->gbuffer_read_ms : nullptr, stage_start);
+  stage_start = InputClock::now();
+  RoughnessFromGlossTopOrigin(rgba, screen_w, screen_h, position_rgba,
+                              screen_w, screen_h, &out->buffers[5]);
+  ResizeDepthFromPositionTopOrigin(position_rgba, screen_w, screen_h,
+                                   screen_w, screen_h, camera_pos, &out->buffers[9]);
+  AddInputElapsed(timing ? &timing->gbuffer_resize_ms : nullptr, stage_start);
+
+  if (!read_screen(ScreenSpaceLightAttachment::kSSLightVec, 6, false)) {
+    if (error) {
+      *error = "Failed to stage screen-space light vector attachment.";
+    }
+    return false;
+  }
+
+  stage_start = InputClock::now();
+  if (!ReadTextureResizedRGBA32F(screen_space_light.Texture(
+                                     ScreenSpaceLightAttachment::kSSLightDepth),
+                                 screen_space_light.width(),
+                                 screen_space_light.height(), screen_w, screen_h,
+                                 GL_LINEAR, &rgba)) {
+    if (error) {
+      *error = "Failed to stage screen-space light depth attachment.";
+    }
+    return false;
+  }
+  AddInputElapsed(timing ? &timing->screen_read_ms : nullptr, stage_start);
+  stage_start = InputClock::now();
+  ResizeScalarTopOrigin(rgba, screen_w, screen_h, screen_w, screen_h,
+                        1, &out->buffers[7]);
+  ResizeScalarTopOrigin(rgba, screen_w, screen_h, screen_w, screen_h,
+                        0, &out->buffers[8]);
+  AddInputElapsed(timing ? &timing->screen_resize_ms : nullptr, stage_start);
+
+  std::vector<float> light_position_stage_rgba;
+  std::vector<float> light_normal_stage_rgba;
+  std::vector<float> light_albedo_stage_rgba;
+  std::vector<float> light_position_rgba;
+  std::vector<float> light_normal_rgba;
+  std::vector<float> light_albedo_rgba;
+
+  auto read_light = [&](LightSpaceAttachment attachment,
+                        std::vector<float>* stage_rgba,
+                        std::vector<float>* top_rgba,
+                        const char* label) -> bool {
+    InputTimePoint read_start = InputClock::now();
+    if (!ReadTextureResizedRGBA32F(screen_space_light.Texture(attachment),
+                                   screen_space_light.light_space_width(),
+                                   screen_space_light.light_space_height(),
+                                   rsm_w, rsm_h, GL_LINEAR, stage_rgba)) {
+      if (error) {
+        *error = std::string("Failed to stage ") + label + " attachment.";
+      }
+      return false;
+    }
+    AddInputElapsed(timing ? &timing->light_read_ms : nullptr, read_start);
+    InputTimePoint convert_start = InputClock::now();
+    ResizeRgbaTopOrigin(*stage_rgba, rsm_w, rsm_h, rsm_w, rsm_h, top_rgba);
+    AddInputElapsed(timing ? &timing->light_downsample_ms : nullptr, convert_start);
+    return true;
+  };
+
+  if (!read_light(LightSpaceAttachment::kSMPosition, &light_position_stage_rgba,
+                  &light_position_rgba, "smPosition") ||
+      !read_light(LightSpaceAttachment::kSMNormal, &light_normal_stage_rgba,
+                  &light_normal_rgba, "smNormal") ||
+      !read_light(LightSpaceAttachment::kSMFlux, &light_albedo_stage_rgba,
+                  &light_albedo_rgba, "smFlux")) {
+    return false;
+  }
+
+  stage_start = InputClock::now();
+  MaskedRgbFromRgba(light_position_rgba, light_normal_rgba, rsm_w, rsm_h,
+                    &out->buffers[10]);
+  MaskedRgbFromRgba(light_normal_rgba, light_normal_rgba, rsm_w, rsm_h,
+                    &out->buffers[11]);
+  MaskedRgbFromRgba(light_albedo_rgba, light_normal_rgba, rsm_w, rsm_h,
+                    &out->buffers[12]);
+  AddInputElapsed(timing ? &timing->light_mask_ms : nullptr, stage_start);
+
+  stage_start = InputClock::now();
+  out->buffers[13] = {config.max_scale[0], config.max_scale[1], config.max_scale[2]};
+  FillRuntimeInputShapes(screen_w, screen_h, rsm_w, rsm_h, out);
+  AddInputElapsed(timing ? &timing->finalize_ms : nullptr, stage_start);
+  return true;
+}
+
 }  // namespace
 
 bool BuildOnnxRuntimeInputs(const GBufferPass& gbuffer,
@@ -602,6 +892,10 @@ bool BuildOnnxRuntimeInputs(const GBufferPass& gbuffer,
                             OnnxRuntimeInputs* out,
                             std::string* error,
                             OnnxRuntimeInputTiming* timing) {
+  if (config.use_gpu_staging) {
+    return BuildRuntimeInputBuffersGpuStaging(gbuffer, screen_space_light, camera_pos,
+                                             config, out, error, timing);
+  }
   return BuildRuntimeInputBuffers(gbuffer, screen_space_light, camera_pos, config, out, error,
                                   timing);
 }
