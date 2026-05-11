@@ -29,12 +29,24 @@ struct OnnxRuntimeInputs {
   std::array<std::vector<int64_t>, kOnnxRuntimeInputCount> shapes;
 };
 
+struct OnnxRuntimeInputTiming {
+  double gbuffer_read_ms = 0.0;
+  double gbuffer_resize_ms = 0.0;
+  double screen_read_ms = 0.0;
+  double screen_resize_ms = 0.0;
+  double light_read_ms = 0.0;
+  double light_downsample_ms = 0.0;
+  double light_mask_ms = 0.0;
+  double finalize_ms = 0.0;
+};
+
 bool BuildOnnxRuntimeInputs(const GBufferPass& gbuffer,
                             const ScreenSpaceLightPass& screen_space_light,
                             const float camera_pos[3],
                             const OnnxIndirectConfig& config,
                             OnnxRuntimeInputs* out,
-                            std::string* error);
+                            std::string* error,
+                            OnnxRuntimeInputTiming* timing = nullptr);
 
 class OnnxIndirectBackend {
  public:

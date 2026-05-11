@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <memory>
 #include <sstream>
@@ -21,6 +22,19 @@ namespace mujoco::nelif {
 namespace {
 
 constexpr int kRgbaChannels = 4;
+
+using InputClock = std::chrono::steady_clock;
+using InputTimePoint = InputClock::time_point;
+
+double InputElapsedMs(InputTimePoint start, InputTimePoint end) {
+  return std::chrono::duration<double, std::milli>(end - start).count();
+}
+
+void AddInputElapsed(double* total, InputTimePoint start) {
+  if (total) {
+    *total += InputElapsedMs(start, InputClock::now());
+  }
+}
 
 float ClampFloat(float value, float lo, float hi) {
   return std::min(std::max(value, lo), hi);
@@ -399,7 +413,11 @@ bool BuildRuntimeInputBuffers(const GBufferPass& gbuffer,
                               const float camera_pos[3],
                               const OnnxIndirectConfig& config,
                               OnnxRuntimeInputs* out,
-                              std::string* error) {
+                              std::string* error,
+                              OnnxRuntimeInputTiming* timing) {
+  if (timing) {
+    *timing = OnnxRuntimeInputTiming();
+  }
   const int screen_w = config.screen_width;
   const int screen_h = config.screen_height;
   const int rsm_face = config.rsm_face_size;
@@ -418,9 +436,12 @@ bool BuildRuntimeInputBuffers(const GBufferPass& gbuffer,
 
   auto read_gbuffer = [&](GBufferAttachment attachment, int index, bool scalar,
                           int channel = 0) -> bool {
+    InputTimePoint stage_start = InputClock::now();
     if (!gbuffer.Readback(attachment, &rgba)) {
       return false;
     }
+    AddInputElapsed(timing ? &timing->gbuffer_read_ms : nullptr, stage_start);
+    stage_start = InputClock::now();
     if (scalar) {
       ResizeScalarTopOrigin(rgba, gbuffer.width(), gbuffer.height(), screen_w, screen_h,
                             channel, &out->buffers[index]);
@@ -428,14 +449,18 @@ bool BuildRuntimeInputBuffers(const GBufferPass& gbuffer,
       ResizeRgbTopOrigin(rgba, gbuffer.width(), gbuffer.height(), screen_w, screen_h,
                          &out->buffers[index]);
     }
+    AddInputElapsed(timing ? &timing->gbuffer_resize_ms : nullptr, stage_start);
     return true;
   };
 
   auto read_screen = [&](ScreenSpaceLightAttachment attachment, int index, bool scalar,
                          int channel = 0) -> bool {
+    InputTimePoint stage_start = InputClock::now();
     if (!screen_space_light.Readback(attachment, &rgba)) {
       return false;
     }
+    AddInputElapsed(timing ? &timing->screen_read_ms : nullptr, stage_start);
+    stage_start = InputClock::now();
     if (scalar) {
       ResizeScalarTopOrigin(rgba, screen_space_light.width(), screen_space_light.height(),
                             screen_w, screen_h, channel, &out->buffers[index]);
@@ -443,17 +468,22 @@ bool BuildRuntimeInputBuffers(const GBufferPass& gbuffer,
       ResizeRgbTopOrigin(rgba, screen_space_light.width(), screen_space_light.height(),
                          screen_w, screen_h, &out->buffers[index]);
     }
+    AddInputElapsed(timing ? &timing->screen_resize_ms : nullptr, stage_start);
     return true;
   };
 
+  InputTimePoint stage_start = InputClock::now();
   if (!gbuffer.Readback(GBufferAttachment::kPosition, &position_rgba)) {
     if (error) {
       *error = "Failed to read Position attachment.";
     }
     return false;
   }
+  AddInputElapsed(timing ? &timing->gbuffer_read_ms : nullptr, stage_start);
+  stage_start = InputClock::now();
   ResizeRgbTopOrigin(position_rgba, gbuffer.width(), gbuffer.height(), screen_w, screen_h,
                      &out->buffers[0]);
+  AddInputElapsed(timing ? &timing->gbuffer_resize_ms : nullptr, stage_start);
 
   if (!read_gbuffer(GBufferAttachment::kNormal, 1, false) ||
       !read_gbuffer(GBufferAttachment::kOutDir, 2, false) ||
@@ -465,66 +495,101 @@ bool BuildRuntimeInputBuffers(const GBufferPass& gbuffer,
     return false;
   }
 
+  stage_start = InputClock::now();
   if (!gbuffer.Readback(GBufferAttachment::kGloss, &rgba)) {
     if (error) {
       *error = "Failed to read Gloss attachment.";
     }
     return false;
   }
+  AddInputElapsed(timing ? &timing->gbuffer_read_ms : nullptr, stage_start);
+  stage_start = InputClock::now();
   RoughnessFromGlossTopOrigin(rgba, gbuffer.width(), gbuffer.height(), position_rgba,
                               screen_w, screen_h, &out->buffers[5]);
+  AddInputElapsed(timing ? &timing->gbuffer_resize_ms : nullptr, stage_start);
 
-  if (!read_screen(ScreenSpaceLightAttachment::kSSLightVec, 6, false) ||
-      !read_screen(ScreenSpaceLightAttachment::kSSLightDepth, 7, true, 1) ||
-      !read_screen(ScreenSpaceLightAttachment::kSSLightDepth, 8, true, 0)) {
+  if (!read_screen(ScreenSpaceLightAttachment::kSSLightVec, 6, false)) {
     if (error) {
       *error = "Failed to read screen-space light attachment.";
     }
     return false;
   }
 
+  stage_start = InputClock::now();
+  if (!screen_space_light.Readback(ScreenSpaceLightAttachment::kSSLightDepth, &rgba)) {
+    if (error) {
+      *error = "Failed to read screen-space light depth attachment.";
+    }
+    return false;
+  }
+  AddInputElapsed(timing ? &timing->screen_read_ms : nullptr, stage_start);
+  stage_start = InputClock::now();
+  ResizeScalarTopOrigin(rgba, screen_space_light.width(), screen_space_light.height(),
+                        screen_w, screen_h, 1, &out->buffers[7]);
+  ResizeScalarTopOrigin(rgba, screen_space_light.width(), screen_space_light.height(),
+                        screen_w, screen_h, 0, &out->buffers[8]);
+  AddInputElapsed(timing ? &timing->screen_resize_ms : nullptr, stage_start);
+
+  stage_start = InputClock::now();
   ResizeDepthFromPositionTopOrigin(position_rgba, gbuffer.width(), gbuffer.height(),
                                    screen_w, screen_h, camera_pos, &out->buffers[9]);
+  AddInputElapsed(timing ? &timing->gbuffer_resize_ms : nullptr, stage_start);
 
   std::vector<float> light_position_rgba;
   std::vector<float> light_normal_rgba;
   std::vector<float> light_albedo_rgba;
+  stage_start = InputClock::now();
   if (!screen_space_light.Readback(LightSpaceAttachment::kSMPosition, &rgba)) {
     if (error) {
       *error = "Failed to read smPosition attachment.";
     }
     return false;
   }
+  AddInputElapsed(timing ? &timing->light_read_ms : nullptr, stage_start);
+  stage_start = InputClock::now();
   DownsampleLightRgbaTopOrigin(rgba, screen_space_light.light_space_width(),
                                screen_space_light.light_space_height(), rsm_face,
                                &light_position_rgba);
+  AddInputElapsed(timing ? &timing->light_downsample_ms : nullptr, stage_start);
+  stage_start = InputClock::now();
   if (!screen_space_light.Readback(LightSpaceAttachment::kSMNormal, &rgba)) {
     if (error) {
       *error = "Failed to read smNormal attachment.";
     }
     return false;
   }
+  AddInputElapsed(timing ? &timing->light_read_ms : nullptr, stage_start);
+  stage_start = InputClock::now();
   DownsampleLightRgbaTopOrigin(rgba, screen_space_light.light_space_width(),
                                screen_space_light.light_space_height(), rsm_face,
                                &light_normal_rgba);
+  AddInputElapsed(timing ? &timing->light_downsample_ms : nullptr, stage_start);
+  stage_start = InputClock::now();
   if (!screen_space_light.Readback(LightSpaceAttachment::kSMFlux, &rgba)) {
     if (error) {
       *error = "Failed to read smFlux attachment.";
     }
     return false;
   }
+  AddInputElapsed(timing ? &timing->light_read_ms : nullptr, stage_start);
+  stage_start = InputClock::now();
   DownsampleLightRgbaTopOrigin(rgba, screen_space_light.light_space_width(),
                                screen_space_light.light_space_height(), rsm_face,
                                &light_albedo_rgba);
+  AddInputElapsed(timing ? &timing->light_downsample_ms : nullptr, stage_start);
+  stage_start = InputClock::now();
   MaskedRgbFromRgba(light_position_rgba, light_normal_rgba, rsm_w, rsm_h,
                     &out->buffers[10]);
   MaskedRgbFromRgba(light_normal_rgba, light_normal_rgba, rsm_w, rsm_h,
                     &out->buffers[11]);
   MaskedRgbFromRgba(light_albedo_rgba, light_normal_rgba, rsm_w, rsm_h,
                     &out->buffers[12]);
+  AddInputElapsed(timing ? &timing->light_mask_ms : nullptr, stage_start);
 
+  stage_start = InputClock::now();
   out->buffers[13] = {config.max_scale[0], config.max_scale[1], config.max_scale[2]};
   FillRuntimeInputShapes(screen_w, screen_h, rsm_w, rsm_h, out);
+  AddInputElapsed(timing ? &timing->finalize_ms : nullptr, stage_start);
   return true;
 }
 
@@ -535,8 +600,10 @@ bool BuildOnnxRuntimeInputs(const GBufferPass& gbuffer,
                             const float camera_pos[3],
                             const OnnxIndirectConfig& config,
                             OnnxRuntimeInputs* out,
-                            std::string* error) {
-  return BuildRuntimeInputBuffers(gbuffer, screen_space_light, camera_pos, config, out, error);
+                            std::string* error,
+                            OnnxRuntimeInputTiming* timing) {
+  return BuildRuntimeInputBuffers(gbuffer, screen_space_light, camera_pos, config, out, error,
+                                  timing);
 }
 
 struct OnnxIndirectBackend::Impl {

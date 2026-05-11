@@ -110,6 +110,14 @@ struct FrameTiming {
   double gbuffer_ms = 0.0;
   double light_ms = 0.0;
   double input_pack_ms = 0.0;
+  double input_gbuffer_read_ms = 0.0;
+  double input_gbuffer_resize_ms = 0.0;
+  double input_screen_read_ms = 0.0;
+  double input_screen_resize_ms = 0.0;
+  double input_light_read_ms = 0.0;
+  double input_light_downsample_ms = 0.0;
+  double input_light_mask_ms = 0.0;
+  double input_finalize_ms = 0.0;
   double indirect_onnx_ms = 0.0;
   double shadow_onnx_ms = 0.0;
   double upload_ms = 0.0;
@@ -138,6 +146,14 @@ struct RuntimeProfiler {
     total->gbuffer_ms += timing.gbuffer_ms;
     total->light_ms += timing.light_ms;
     total->input_pack_ms += timing.input_pack_ms;
+    total->input_gbuffer_read_ms += timing.input_gbuffer_read_ms;
+    total->input_gbuffer_resize_ms += timing.input_gbuffer_resize_ms;
+    total->input_screen_read_ms += timing.input_screen_read_ms;
+    total->input_screen_resize_ms += timing.input_screen_resize_ms;
+    total->input_light_read_ms += timing.input_light_read_ms;
+    total->input_light_downsample_ms += timing.input_light_downsample_ms;
+    total->input_light_mask_ms += timing.input_light_mask_ms;
+    total->input_finalize_ms += timing.input_finalize_ms;
     total->indirect_onnx_ms += timing.indirect_onnx_ms;
     total->shadow_onnx_ms += timing.shadow_onnx_ms;
     total->upload_ms += timing.upload_ms;
@@ -194,6 +210,14 @@ struct RuntimeProfiler {
     average.gbuffer_ms = final_totals.gbuffer_ms * inv;
     average.light_ms = final_totals.light_ms * inv;
     average.input_pack_ms = final_totals.input_pack_ms * inv;
+    average.input_gbuffer_read_ms = final_totals.input_gbuffer_read_ms * inv;
+    average.input_gbuffer_resize_ms = final_totals.input_gbuffer_resize_ms * inv;
+    average.input_screen_read_ms = final_totals.input_screen_read_ms * inv;
+    average.input_screen_resize_ms = final_totals.input_screen_resize_ms * inv;
+    average.input_light_read_ms = final_totals.input_light_read_ms * inv;
+    average.input_light_downsample_ms = final_totals.input_light_downsample_ms * inv;
+    average.input_light_mask_ms = final_totals.input_light_mask_ms * inv;
+    average.input_finalize_ms = final_totals.input_finalize_ms * inv;
     average.indirect_onnx_ms = final_totals.indirect_onnx_ms * inv;
     average.shadow_onnx_ms = final_totals.shadow_onnx_ms * inv;
     average.upload_ms = final_totals.upload_ms * inv;
@@ -502,6 +526,16 @@ bool WriteProfileJson(const std::filesystem::path& path, int framebuffer_width,
   out << "    \"compose\": " << average.compose_ms << ",\n";
   out << "    \"draw\": " << average.draw_ms << ",\n";
   out << "    \"swap_poll\": " << average.swap_poll_ms << "\n";
+  out << "  },\n";
+  out << "  \"input_pack_breakdown_ms\": {\n";
+  out << "    \"gbuffer_read\": " << average.input_gbuffer_read_ms << ",\n";
+  out << "    \"gbuffer_resize\": " << average.input_gbuffer_resize_ms << ",\n";
+  out << "    \"screen_read\": " << average.input_screen_read_ms << ",\n";
+  out << "    \"screen_resize\": " << average.input_screen_resize_ms << ",\n";
+  out << "    \"light_read\": " << average.input_light_read_ms << ",\n";
+  out << "    \"light_downsample\": " << average.input_light_downsample_ms << ",\n";
+  out << "    \"light_mask\": " << average.input_light_mask_ms << ",\n";
+  out << "    \"finalize\": " << average.input_finalize_ms << "\n";
   out << "  }\n";
   out << "}\n";
   if (!out) {
@@ -895,6 +929,7 @@ int main(int argc, const char** argv) {
     mujoco::nelif::OnnxRuntimeInputs runtime_inputs;
     mujoco::nelif::OnnxRuntimeInputs* runtime_inputs_ptr = nullptr;
     if (indirect_backend.IsEnabled() || shadow_backend.IsEnabled()) {
+      mujoco::nelif::OnnxRuntimeInputTiming input_timing;
       float camera_pos[3];
       CurrentCameraPos(camera_pos);
       const mujoco::nelif::OnnxIndirectConfig& input_config =
@@ -902,8 +937,17 @@ int main(int argc, const char** argv) {
       std::string error;
       stage_start = Clock::now();
       if (mujoco::nelif::BuildOnnxRuntimeInputs(gbuffer, screen_space_light, camera_pos,
-                                                input_config, &runtime_inputs, &error)) {
+                                                input_config, &runtime_inputs, &error,
+                                                &input_timing)) {
         runtime_inputs_ptr = &runtime_inputs;
+        timing.input_gbuffer_read_ms = input_timing.gbuffer_read_ms;
+        timing.input_gbuffer_resize_ms = input_timing.gbuffer_resize_ms;
+        timing.input_screen_read_ms = input_timing.screen_read_ms;
+        timing.input_screen_resize_ms = input_timing.screen_resize_ms;
+        timing.input_light_read_ms = input_timing.light_read_ms;
+        timing.input_light_downsample_ms = input_timing.light_downsample_ms;
+        timing.input_light_mask_ms = input_timing.light_mask_ms;
+        timing.input_finalize_ms = input_timing.finalize_ms;
       } else if (!runtime_input_warned) {
         runtime_input_failed = true;
         std::fprintf(stderr, "ONNX runtime input packing failed: %s\n", error.c_str());
