@@ -272,6 +272,80 @@ void ResizeScalarTopOrigin(const std::vector<float>& rgba, int src_width, int sr
   }
 }
 
+void CopyRgbTopOrigin(const std::vector<float>& rgba, int width, int height,
+                      std::vector<float>* out) {
+  out->assign(static_cast<size_t>(width) * height * 3, 0.0f);
+  for (int y_top = 0; y_top < height; ++y_top) {
+    const int y_gl = height - 1 - y_top;
+    for (int x = 0; x < width; ++x) {
+      const size_t src = (static_cast<size_t>(y_gl) * width + x) * 4;
+      const size_t dst = (static_cast<size_t>(y_top) * width + x) * 3;
+      out->at(dst + 0) = rgba[src + 0];
+      out->at(dst + 1) = rgba[src + 1];
+      out->at(dst + 2) = rgba[src + 2];
+    }
+  }
+}
+
+void CopyRgbaTopOrigin(const std::vector<float>& rgba, int width, int height,
+                       std::vector<float>* out) {
+  out->assign(static_cast<size_t>(width) * height * 4, 0.0f);
+  for (int y_top = 0; y_top < height; ++y_top) {
+    const int y_gl = height - 1 - y_top;
+    const size_t src = static_cast<size_t>(y_gl) * width * 4;
+    const size_t dst = static_cast<size_t>(y_top) * width * 4;
+    std::copy_n(rgba.data() + src, static_cast<size_t>(width) * 4,
+                out->data() + dst);
+  }
+}
+
+void CopyScalarTopOrigin(const std::vector<float>& rgba, int width, int height,
+                         int channel, std::vector<float>* out) {
+  out->assign(static_cast<size_t>(width) * height, 0.0f);
+  for (int y_top = 0; y_top < height; ++y_top) {
+    const int y_gl = height - 1 - y_top;
+    for (int x = 0; x < width; ++x) {
+      const size_t src = (static_cast<size_t>(y_gl) * width + x) * 4 + channel;
+      out->at(static_cast<size_t>(y_top) * width + x) = rgba[src];
+    }
+  }
+}
+
+void RoughnessFromGlossSameSizeTopOrigin(const std::vector<float>& gloss_rgba,
+                                         int width, int height,
+                                         const std::vector<float>& position_rgba,
+                                         std::vector<float>* out) {
+  out->assign(static_cast<size_t>(width) * height, 0.0f);
+  for (int y_top = 0; y_top < height; ++y_top) {
+    const int y_gl = height - 1 - y_top;
+    for (int x = 0; x < width; ++x) {
+      const size_t src = (static_cast<size_t>(y_gl) * width + x) * 4;
+      const size_t mask_src = (static_cast<size_t>(y_top) * width + x) * 4;
+      if (position_rgba[mask_src + 3] > 0.5f) {
+        out->at(static_cast<size_t>(y_top) * width + x) =
+            ClampFloat(1.0f - gloss_rgba[src], 0.0f, 1.0f);
+      }
+    }
+  }
+}
+
+void DepthFromPositionSameSizeTopOrigin(const std::vector<float>& position_rgba,
+                                        int width, int height,
+                                        const float camera_pos[3],
+                                        std::vector<float>* out) {
+  out->assign(static_cast<size_t>(width) * height, 0.0f);
+  for (int y_top = 0; y_top < height; ++y_top) {
+    for (int x = 0; x < width; ++x) {
+      const size_t src = (static_cast<size_t>(y_top) * width + x) * 4;
+      const float dx = position_rgba[src + 0] - camera_pos[0];
+      const float dy = position_rgba[src + 1] - camera_pos[1];
+      const float dz = position_rgba[src + 2] - camera_pos[2];
+      out->at(static_cast<size_t>(y_top) * width + x) =
+          std::sqrt(dx * dx + dy * dy + dz * dz);
+    }
+  }
+}
+
 float ReadChannelTopOriginNearest(const std::vector<float>& rgba, int width, int height,
                                   int x, int y_top, int channel) {
   const int y_gl = height - 1 - y_top;
@@ -730,11 +804,9 @@ bool BuildRuntimeInputBuffersGpuStaging(const GBufferPass& gbuffer,
     AddInputElapsed(timing ? &timing->gbuffer_read_ms : nullptr, stage_start);
     stage_start = InputClock::now();
     if (scalar) {
-      ResizeScalarTopOrigin(rgba, screen_w, screen_h, screen_w, screen_h,
-                            channel, &out->buffers[index]);
+      CopyScalarTopOrigin(rgba, screen_w, screen_h, channel, &out->buffers[index]);
     } else {
-      ResizeRgbTopOrigin(rgba, screen_w, screen_h, screen_w, screen_h,
-                         &out->buffers[index]);
+      CopyRgbTopOrigin(rgba, screen_w, screen_h, &out->buffers[index]);
     }
     AddInputElapsed(timing ? &timing->gbuffer_resize_ms : nullptr, stage_start);
     return true;
@@ -752,11 +824,9 @@ bool BuildRuntimeInputBuffersGpuStaging(const GBufferPass& gbuffer,
     AddInputElapsed(timing ? &timing->screen_read_ms : nullptr, stage_start);
     stage_start = InputClock::now();
     if (scalar) {
-      ResizeScalarTopOrigin(rgba, screen_w, screen_h, screen_w, screen_h,
-                            channel, &out->buffers[index]);
+      CopyScalarTopOrigin(rgba, screen_w, screen_h, channel, &out->buffers[index]);
     } else {
-      ResizeRgbTopOrigin(rgba, screen_w, screen_h, screen_w, screen_h,
-                         &out->buffers[index]);
+      CopyRgbTopOrigin(rgba, screen_w, screen_h, &out->buffers[index]);
     }
     AddInputElapsed(timing ? &timing->screen_resize_ms : nullptr, stage_start);
     return true;
@@ -773,8 +843,8 @@ bool BuildRuntimeInputBuffersGpuStaging(const GBufferPass& gbuffer,
   }
   AddInputElapsed(timing ? &timing->gbuffer_read_ms : nullptr, stage_start);
   stage_start = InputClock::now();
-  ResizeRgbTopOrigin(position_rgba, screen_w, screen_h, screen_w, screen_h,
-                     &out->buffers[0]);
+  CopyRgbTopOrigin(position_rgba, screen_w, screen_h, &out->buffers[0]);
+  CopyRgbaTopOrigin(position_rgba, screen_w, screen_h, &position_rgba);
   AddInputElapsed(timing ? &timing->gbuffer_resize_ms : nullptr, stage_start);
 
   if (!read_gbuffer(GBufferAttachment::kNormal, 1, false) ||
@@ -798,10 +868,10 @@ bool BuildRuntimeInputBuffersGpuStaging(const GBufferPass& gbuffer,
   }
   AddInputElapsed(timing ? &timing->gbuffer_read_ms : nullptr, stage_start);
   stage_start = InputClock::now();
-  RoughnessFromGlossTopOrigin(rgba, screen_w, screen_h, position_rgba,
-                              screen_w, screen_h, &out->buffers[5]);
-  ResizeDepthFromPositionTopOrigin(position_rgba, screen_w, screen_h,
-                                   screen_w, screen_h, camera_pos, &out->buffers[9]);
+  RoughnessFromGlossSameSizeTopOrigin(rgba, screen_w, screen_h, position_rgba,
+                                      &out->buffers[5]);
+  DepthFromPositionSameSizeTopOrigin(position_rgba, screen_w, screen_h,
+                                     camera_pos, &out->buffers[9]);
   AddInputElapsed(timing ? &timing->gbuffer_resize_ms : nullptr, stage_start);
 
   if (!read_screen(ScreenSpaceLightAttachment::kSSLightVec, 6, false)) {
@@ -824,10 +894,8 @@ bool BuildRuntimeInputBuffersGpuStaging(const GBufferPass& gbuffer,
   }
   AddInputElapsed(timing ? &timing->screen_read_ms : nullptr, stage_start);
   stage_start = InputClock::now();
-  ResizeScalarTopOrigin(rgba, screen_w, screen_h, screen_w, screen_h,
-                        1, &out->buffers[7]);
-  ResizeScalarTopOrigin(rgba, screen_w, screen_h, screen_w, screen_h,
-                        0, &out->buffers[8]);
+  CopyScalarTopOrigin(rgba, screen_w, screen_h, 1, &out->buffers[7]);
+  CopyScalarTopOrigin(rgba, screen_w, screen_h, 0, &out->buffers[8]);
   AddInputElapsed(timing ? &timing->screen_resize_ms : nullptr, stage_start);
 
   std::vector<float> light_position_stage_rgba;
@@ -853,7 +921,7 @@ bool BuildRuntimeInputBuffersGpuStaging(const GBufferPass& gbuffer,
     }
     AddInputElapsed(timing ? &timing->light_read_ms : nullptr, read_start);
     InputTimePoint convert_start = InputClock::now();
-    ResizeRgbaTopOrigin(*stage_rgba, rsm_w, rsm_h, rsm_w, rsm_h, top_rgba);
+    CopyRgbaTopOrigin(*stage_rgba, rsm_w, rsm_h, top_rgba);
     AddInputElapsed(timing ? &timing->light_downsample_ms : nullptr, convert_start);
     return true;
   };
