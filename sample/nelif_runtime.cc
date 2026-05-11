@@ -100,6 +100,7 @@ std::optional<std::string> shadow_onnx_path;
 std::optional<std::filesystem::path> output_root;
 std::optional<std::filesystem::path> profile_output;
 bool onnx_gpu_staging = false;
+bool onnx_pbo_readback = false;
 
 double ElapsedMs(TimePoint start, TimePoint end) {
   return std::chrono::duration<double, std::milli>(end - start).count();
@@ -284,6 +285,7 @@ void PrintUsage() {
       "[--indirect-onnx path] [--shadow-onnx path] "
       "[--onnx-provider cpu|coreml|cuda|tensorrt] "
       "[--onnx-input-staging cpu|gpu] "
+      "[--onnx-readback sync|pbo] "
       "[--onnx-screen-size px] [--onnx-screen-width px] "
       "[--onnx-screen-height px] [--onnx-rsm-face-size px] [--onnx-max-scale r g b] "
       "[--profile-runtime] [--profile-warmup-frames n] [--profile-output path] "
@@ -371,6 +373,19 @@ bool ParseArgs(int argc, const char** argv) {
         std::fprintf(stderr, "Invalid --onnx-input-staging value: %s\n", value);
         return false;
       }
+    } else if (!std::strcmp(argv[i], "--onnx-readback")) {
+      if (i + 1 >= argc) {
+        return false;
+      }
+      const char* value = argv[++i];
+      if (!std::strcmp(value, "sync")) {
+        onnx_pbo_readback = false;
+      } else if (!std::strcmp(value, "pbo")) {
+        onnx_pbo_readback = true;
+      } else {
+        std::fprintf(stderr, "Invalid --onnx-readback value: %s\n", value);
+        return false;
+      }
     } else if (!std::strcmp(argv[i], "--onnx-screen-size")) {
       int size = 0;
       if (i + 1 >= argc || !ParseIntFlagValue(argv[++i], &size)) {
@@ -435,8 +450,13 @@ bool ParseArgs(int argc, const char** argv) {
       return false;
     }
   }
+  if (!onnx_gpu_staging) {
+    onnx_pbo_readback = false;
+  }
   indirect_config.use_gpu_staging = onnx_gpu_staging;
   shadow_config.use_gpu_staging = onnx_gpu_staging;
+  indirect_config.use_pbo_readback = onnx_pbo_readback;
+  shadow_config.use_pbo_readback = onnx_pbo_readback;
   return true;
 }
 
@@ -519,6 +539,8 @@ bool WriteProfileJson(const std::filesystem::path& path, int framebuffer_width,
   out << "  \"onnx_rsm_face_size\": " << indirect_config.rsm_face_size << ",\n";
   out << "  \"onnx_input_staging\": \""
       << (onnx_gpu_staging ? "gpu" : "cpu") << "\",\n";
+  out << "  \"onnx_readback\": \""
+      << (onnx_pbo_readback ? "pbo" : "sync") << "\",\n";
   out << "  \"indirect_onnx\": \"" << JsonEscape(indirect_onnx_path.value_or("")) << "\",\n";
   out << "  \"shadow_onnx\": \"" << JsonEscape(shadow_onnx_path.value_or("")) << "\",\n";
   out << "  \"indirect_enabled\": " << JsonBool(indirect_backend.IsEnabled()) << ",\n";

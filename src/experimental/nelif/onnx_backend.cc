@@ -5,6 +5,7 @@
 #include <cctype>
 #include <chrono>
 #include <cmath>
+#include <cstring>
 #include <memory>
 #include <sstream>
 #include <stdexcept>
@@ -16,6 +17,10 @@
 
 #ifndef GL_RGBA32F
 #define GL_RGBA32F 0x8814
+#endif
+
+#ifndef GL_READ_ONLY
+#define GL_READ_ONLY 0x88B8
 #endif
 
 #if MUJOCO_NELIF_HAS_ONNXRUNTIME
@@ -44,7 +49,7 @@ class RgbaReadbackStager {
  public:
   bool Read(GLuint source_texture, int source_width, int source_height,
             int target_width, int target_height, GLenum filter,
-            std::vector<float>* rgba) {
+            bool use_pbo, std::vector<float>* rgba) {
     if (!source_texture || source_width <= 0 || source_height <= 0 ||
         target_width <= 0 || target_height <= 0 || !rgba) {
       return false;
@@ -56,9 +61,11 @@ class RgbaReadbackStager {
     GLint previous_read_fbo = 0;
     GLint previous_draw_fbo = 0;
     GLint previous_texture = 0;
+    GLint previous_pack_buffer = 0;
     glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &previous_read_fbo);
     glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &previous_draw_fbo);
     glGetIntegerv(GL_TEXTURE_BINDING_2D, &previous_texture);
+    glGetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING, &previous_pack_buffer);
 
     glBindFramebuffer(GL_READ_FRAMEBUFFER, read_fbo_);
     glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
@@ -73,7 +80,8 @@ class RgbaReadbackStager {
 
     if (glCheckFramebufferStatus(GL_READ_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE ||
         glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
-      Restore(previous_read_fbo, previous_draw_fbo, previous_texture);
+      Restore(previous_read_fbo, previous_draw_fbo, previous_texture,
+              previous_pack_buffer);
       return false;
     }
 
@@ -83,14 +91,28 @@ class RgbaReadbackStager {
 
     glBindFramebuffer(GL_READ_FRAMEBUFFER, draw_fbo_);
     glReadBuffer(GL_COLOR_ATTACHMENT0);
-    glReadPixels(0, 0, target_width, target_height, GL_RGBA, GL_FLOAT, rgba->data());
 
-    const GLenum error = glGetError();
-    Restore(previous_read_fbo, previous_draw_fbo, previous_texture);
-    return error == GL_NO_ERROR;
+    bool ok = false;
+    if (use_pbo) {
+      ok = ReadPixelsPbo(source_texture, target_width, target_height, rgba);
+    } else {
+      glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+      glReadPixels(0, 0, target_width, target_height, GL_RGBA, GL_FLOAT, rgba->data());
+      ok = glGetError() == GL_NO_ERROR;
+    }
+
+    Restore(previous_read_fbo, previous_draw_fbo, previous_texture,
+            previous_pack_buffer);
+    return ok;
   }
 
  private:
+  struct PboSlot {
+    GLuint pbo = 0;
+    size_t bytes = 0;
+    bool pending = false;
+  };
+
   void Ensure(int width, int height) {
     if (!read_fbo_) {
       glGenFramebuffers(1, &read_fbo_);
@@ -115,10 +137,53 @@ class RgbaReadbackStager {
                  GL_RGBA, GL_FLOAT, nullptr);
   }
 
-  void Restore(GLint read_fbo, GLint draw_fbo, GLint texture) {
+  bool ReadPixelsPbo(GLuint source_texture, int width, int height,
+                     std::vector<float>* rgba) {
+    const size_t bytes = static_cast<size_t>(width) * height * 4 * sizeof(float);
+    PboSlot& slot = pbo_slots_[PboKey(source_texture, width, height)];
+    if (!slot.pbo) {
+      glGenBuffers(1, &slot.pbo);
+    }
+    if (slot.bytes != bytes) {
+      slot.bytes = bytes;
+      slot.pending = false;
+      glBindBuffer(GL_PIXEL_PACK_BUFFER, slot.pbo);
+      glBufferData(GL_PIXEL_PACK_BUFFER, slot.bytes, nullptr, GL_STREAM_READ);
+    }
+
+    if (slot.pending) {
+      glBindBuffer(GL_PIXEL_PACK_BUFFER, slot.pbo);
+      void* mapped = glMapBuffer(GL_PIXEL_PACK_BUFFER, GL_READ_ONLY);
+      if (mapped) {
+        std::memcpy(rgba->data(), mapped, slot.bytes);
+        glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
+      }
+      slot.pending = false;
+    }
+
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, slot.pbo);
+    glBufferData(GL_PIXEL_PACK_BUFFER, slot.bytes, nullptr, GL_STREAM_READ);
+    glReadPixels(0, 0, width, height, GL_RGBA, GL_FLOAT, nullptr);
+    const GLenum read_error = glGetError();
+    slot.pending = read_error == GL_NO_ERROR;
+
+    // First frame, or a missed previous map, keeps the zero-initialized output.
+    // Warmup frames in benchmarks hide this startup latency.
+    return read_error == GL_NO_ERROR;
+  }
+
+  static uint64_t PboKey(GLuint texture, int width, int height) {
+    const uint64_t t = static_cast<uint64_t>(texture);
+    const uint64_t w = static_cast<uint64_t>(static_cast<uint32_t>(width));
+    const uint64_t h = static_cast<uint64_t>(static_cast<uint32_t>(height));
+    return (t << 32) ^ (w << 16) ^ h;
+  }
+
+  void Restore(GLint read_fbo, GLint draw_fbo, GLint texture, GLint pack_buffer) {
     glBindFramebuffer(GL_READ_FRAMEBUFFER, static_cast<GLuint>(read_fbo));
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, static_cast<GLuint>(draw_fbo));
     glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(texture));
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, static_cast<GLuint>(pack_buffer));
   }
 
   GLuint read_fbo_ = 0;
@@ -126,14 +191,15 @@ class RgbaReadbackStager {
   GLuint staging_texture_ = 0;
   int width_ = 0;
   int height_ = 0;
+  std::unordered_map<uint64_t, PboSlot> pbo_slots_;
 };
 
 bool ReadTextureResizedRGBA32F(GLuint texture, int source_width, int source_height,
                                int target_width, int target_height, GLenum filter,
-                               std::vector<float>* rgba) {
+                               bool use_pbo, std::vector<float>* rgba) {
   static thread_local RgbaReadbackStager stager;
   return stager.Read(texture, source_width, source_height,
-                     target_width, target_height, filter, rgba);
+                     target_width, target_height, filter, use_pbo, rgba);
 }
 
 float ClampFloat(float value, float lo, float hi) {
@@ -792,13 +858,14 @@ bool BuildRuntimeInputBuffersGpuStaging(const GBufferPass& gbuffer,
 
   std::vector<float> rgba;
   std::vector<float> position_rgba;
+  std::vector<float> position_top_rgba;
 
   auto read_gbuffer = [&](GBufferAttachment attachment, int index, bool scalar,
                           int channel = 0) -> bool {
     InputTimePoint stage_start = InputClock::now();
     if (!ReadTextureResizedRGBA32F(gbuffer.Texture(attachment), gbuffer.width(),
                                    gbuffer.height(), screen_w, screen_h,
-                                   GL_LINEAR, &rgba)) {
+                                   GL_LINEAR, config.use_pbo_readback, &rgba)) {
       return false;
     }
     AddInputElapsed(timing ? &timing->gbuffer_read_ms : nullptr, stage_start);
@@ -818,7 +885,7 @@ bool BuildRuntimeInputBuffersGpuStaging(const GBufferPass& gbuffer,
     if (!ReadTextureResizedRGBA32F(screen_space_light.Texture(attachment),
                                    screen_space_light.width(),
                                    screen_space_light.height(), screen_w, screen_h,
-                                   GL_LINEAR, &rgba)) {
+                                   GL_LINEAR, config.use_pbo_readback, &rgba)) {
       return false;
     }
     AddInputElapsed(timing ? &timing->screen_read_ms : nullptr, stage_start);
@@ -835,7 +902,8 @@ bool BuildRuntimeInputBuffersGpuStaging(const GBufferPass& gbuffer,
   InputTimePoint stage_start = InputClock::now();
   if (!ReadTextureResizedRGBA32F(gbuffer.Texture(GBufferAttachment::kPosition),
                                  gbuffer.width(), gbuffer.height(),
-                                 screen_w, screen_h, GL_LINEAR, &position_rgba)) {
+                                 screen_w, screen_h, GL_LINEAR,
+                                 config.use_pbo_readback, &position_rgba)) {
     if (error) {
       *error = "Failed to stage Position attachment.";
     }
@@ -844,7 +912,7 @@ bool BuildRuntimeInputBuffersGpuStaging(const GBufferPass& gbuffer,
   AddInputElapsed(timing ? &timing->gbuffer_read_ms : nullptr, stage_start);
   stage_start = InputClock::now();
   CopyRgbTopOrigin(position_rgba, screen_w, screen_h, &out->buffers[0]);
-  CopyRgbaTopOrigin(position_rgba, screen_w, screen_h, &position_rgba);
+  CopyRgbaTopOrigin(position_rgba, screen_w, screen_h, &position_top_rgba);
   AddInputElapsed(timing ? &timing->gbuffer_resize_ms : nullptr, stage_start);
 
   if (!read_gbuffer(GBufferAttachment::kNormal, 1, false) ||
@@ -860,7 +928,8 @@ bool BuildRuntimeInputBuffersGpuStaging(const GBufferPass& gbuffer,
   stage_start = InputClock::now();
   if (!ReadTextureResizedRGBA32F(gbuffer.Texture(GBufferAttachment::kGloss),
                                  gbuffer.width(), gbuffer.height(),
-                                 screen_w, screen_h, GL_LINEAR, &rgba)) {
+                                 screen_w, screen_h, GL_LINEAR,
+                                 config.use_pbo_readback, &rgba)) {
     if (error) {
       *error = "Failed to stage Gloss attachment.";
     }
@@ -868,9 +937,9 @@ bool BuildRuntimeInputBuffersGpuStaging(const GBufferPass& gbuffer,
   }
   AddInputElapsed(timing ? &timing->gbuffer_read_ms : nullptr, stage_start);
   stage_start = InputClock::now();
-  RoughnessFromGlossSameSizeTopOrigin(rgba, screen_w, screen_h, position_rgba,
+  RoughnessFromGlossSameSizeTopOrigin(rgba, screen_w, screen_h, position_top_rgba,
                                       &out->buffers[5]);
-  DepthFromPositionSameSizeTopOrigin(position_rgba, screen_w, screen_h,
+  DepthFromPositionSameSizeTopOrigin(position_top_rgba, screen_w, screen_h,
                                      camera_pos, &out->buffers[9]);
   AddInputElapsed(timing ? &timing->gbuffer_resize_ms : nullptr, stage_start);
 
@@ -886,7 +955,7 @@ bool BuildRuntimeInputBuffersGpuStaging(const GBufferPass& gbuffer,
                                      ScreenSpaceLightAttachment::kSSLightDepth),
                                  screen_space_light.width(),
                                  screen_space_light.height(), screen_w, screen_h,
-                                 GL_LINEAR, &rgba)) {
+                                 GL_LINEAR, config.use_pbo_readback, &rgba)) {
     if (error) {
       *error = "Failed to stage screen-space light depth attachment.";
     }
@@ -913,7 +982,8 @@ bool BuildRuntimeInputBuffersGpuStaging(const GBufferPass& gbuffer,
     if (!ReadTextureResizedRGBA32F(screen_space_light.Texture(attachment),
                                    screen_space_light.light_space_width(),
                                    screen_space_light.light_space_height(),
-                                   rsm_w, rsm_h, GL_LINEAR, stage_rgba)) {
+                                   rsm_w, rsm_h, GL_LINEAR,
+                                   config.use_pbo_readback, stage_rgba)) {
       if (error) {
         *error = std::string("Failed to stage ") + label + " attachment.";
       }

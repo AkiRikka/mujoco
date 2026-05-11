@@ -15,6 +15,7 @@ struct OnnxIndirectConfig {
   std::string model_path;
   std::string execution_provider = "cpu";
   bool use_gpu_staging = false;
+  bool use_pbo_readback = false;
   int screen_width = 128;
   int screen_height = 128;
   int rsm_face_size = 64;
