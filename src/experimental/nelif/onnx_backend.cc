@@ -51,19 +51,24 @@ void ConfigureExecutionProvider(Ort::SessionOptions* session_options,
     return;
   }
   if (provider == "cuda") {
-    session_options->AppendExecutionProvider("CUDAExecutionProvider", {{"device_id", "0"}});
+    Ort::CUDAProviderOptions cuda_options;
+    cuda_options.Update({{"device_id", "0"}});
+    session_options->AppendExecutionProvider_CUDA_V2(*cuda_options);
     return;
   }
   if (provider == "tensorrt" || provider == "trt") {
-    session_options->AppendExecutionProvider(
-        "TensorrtExecutionProvider",
-        {
-            {"device_id", "0"},
-            {"trt_fp16_enable", "1"},
-            {"trt_engine_cache_enable", "1"},
-            {"trt_timing_cache_enable", "1"},
-        });
-    session_options->AppendExecutionProvider("CUDAExecutionProvider", {{"device_id", "0"}});
+    Ort::TensorRTProviderOptions trt_options;
+    trt_options.Update({
+        {"device_id", "0"},
+        {"trt_fp16_enable", "1"},
+        {"trt_engine_cache_enable", "1"},
+        {"trt_timing_cache_enable", "1"},
+    });
+    session_options->AppendExecutionProvider_TensorRT_V2(*trt_options);
+
+    Ort::CUDAProviderOptions cuda_options;
+    cuda_options.Update({{"device_id", "0"}});
+    session_options->AppendExecutionProvider_CUDA_V2(*cuda_options);
     return;
   }
   throw std::invalid_argument("Unsupported ONNX execution provider: " +
