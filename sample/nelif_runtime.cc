@@ -1,10 +1,10 @@
 // NeLiF runtime scaffold sample.
 //
 // This sample runs the current MuJoCo-side NeLiF render passes every frame and
-// displays the runtime composition output. Direct/shadow are analytic baselines
-// matching direct_from_raw.py; indirect and shadow can be supplied by the
-// optional ONNX Runtime backend when the sample is built with the ONNX Runtime
-// C/C++ SDK.
+// displays the runtime composition output. Direct, indirect, and shadow can be
+// supplied by the optional ONNX Runtime backend when the sample is built with
+// the ONNX Runtime C/C++ SDK. Direct and shadow fall back to analytic baselines;
+// indirect falls back to a zero stub.
 
 #define GL_GLEXT_PROTOTYPES
 #define GLFW_INCLUDE_GLEXT
@@ -68,6 +68,8 @@ mujoco::nelif::OnnxIndirectBackend indirect_backend;
 mujoco::nelif::OnnxIndirectConfig indirect_config;
 mujoco::nelif::OnnxShadowBackend shadow_backend;
 mujoco::nelif::OnnxShadowConfig shadow_config;
+mujoco::nelif::OnnxDirectBackend direct_backend;
+mujoco::nelif::OnnxDirectConfig direct_config;
 
 ViewMode view_mode = ViewMode::kRuntimeShading;
 std::string model_path;
@@ -76,17 +78,21 @@ int window_height = 900;
 int face_size = 512;
 GLuint indirect_texture = 0;
 GLuint shadow_texture = 0;
+GLuint direct_texture = 0;
 bool dump_requested = false;
 bool dump_first_frame = false;
 bool exit_after_dump = false;
 bool dump_completed = false;
 bool indirect_backend_warned = false;
 bool shadow_backend_warned = false;
+bool direct_backend_warned = false;
 bool runtime_input_warned = false;
 bool indirect_init_failed = false;
 bool shadow_init_failed = false;
+bool direct_init_failed = false;
 bool indirect_inference_failed = false;
 bool shadow_inference_failed = false;
+bool direct_inference_failed = false;
 bool runtime_input_failed = false;
 bool profile_runtime = false;
 int profile_warmup_frames = 0;
@@ -97,6 +103,7 @@ std::optional<std::string> camera_name;
 std::optional<std::string> key_name;
 std::optional<std::string> indirect_onnx_path;
 std::optional<std::string> shadow_onnx_path;
+std::optional<std::string> direct_onnx_path;
 std::optional<std::filesystem::path> output_root;
 std::optional<std::filesystem::path> profile_output;
 bool onnx_gpu_staging = false;
@@ -122,6 +129,7 @@ struct FrameTiming {
   double input_finalize_ms = 0.0;
   double indirect_onnx_ms = 0.0;
   double shadow_onnx_ms = 0.0;
+  double direct_onnx_ms = 0.0;
   double upload_ms = 0.0;
   double compose_ms = 0.0;
   double draw_ms = 0.0;
@@ -158,6 +166,7 @@ struct RuntimeProfiler {
     total->input_finalize_ms += timing.input_finalize_ms;
     total->indirect_onnx_ms += timing.indirect_onnx_ms;
     total->shadow_onnx_ms += timing.shadow_onnx_ms;
+    total->direct_onnx_ms += timing.direct_onnx_ms;
     total->upload_ms += timing.upload_ms;
     total->compose_ms += timing.compose_ms;
     total->draw_ms += timing.draw_ms;
@@ -188,13 +197,15 @@ struct RuntimeProfiler {
     std::printf(
         "[nelif_profile] frames=%d fps=%.2f total=%.3fms sim=%.3f scene=%.3f "
         "gbuffer=%.3f light=%.3f input_pack=%.3f indirect_onnx=%.3f "
-        "shadow_onnx=%.3f upload=%.3f compose=%.3f draw=%.3f swap_poll=%.3f\n",
+        "shadow_onnx=%.3f direct_onnx=%.3f upload=%.3f compose=%.3f draw=%.3f "
+        "swap_poll=%.3f\n",
         rolling_frames, fps, avg_total, rolling_totals.sim_ms * inv,
         rolling_totals.scene_ms * inv, rolling_totals.gbuffer_ms * inv,
         rolling_totals.light_ms * inv, rolling_totals.input_pack_ms * inv,
         rolling_totals.indirect_onnx_ms * inv, rolling_totals.shadow_onnx_ms * inv,
-        rolling_totals.upload_ms * inv, rolling_totals.compose_ms * inv,
-        rolling_totals.draw_ms * inv, rolling_totals.swap_poll_ms * inv);
+        rolling_totals.direct_onnx_ms * inv, rolling_totals.upload_ms * inv,
+        rolling_totals.compose_ms * inv, rolling_totals.draw_ms * inv,
+        rolling_totals.swap_poll_ms * inv);
     std::fflush(stdout);
     rolling_totals = FrameTiming();
     rolling_frames = 0;
@@ -222,6 +233,7 @@ struct RuntimeProfiler {
     average.input_finalize_ms = final_totals.input_finalize_ms * inv;
     average.indirect_onnx_ms = final_totals.indirect_onnx_ms * inv;
     average.shadow_onnx_ms = final_totals.shadow_onnx_ms * inv;
+    average.direct_onnx_ms = final_totals.direct_onnx_ms * inv;
     average.upload_ms = final_totals.upload_ms * inv;
     average.compose_ms = final_totals.compose_ms * inv;
     average.draw_ms = final_totals.draw_ms * inv;
@@ -282,7 +294,7 @@ void PrintUsage() {
       "USAGE: nelif_runtime modelfile [--width px] [--height px] [--face-size px] "
       "[--camera name] [--key name] [--shadow-bias v] [--soft-shadow-radius v] "
       "[--diffuse-scale v] [--specular-scale v] [--exposure v] "
-      "[--indirect-onnx path] [--shadow-onnx path] "
+      "[--indirect-onnx path] [--shadow-onnx path] [--direct-onnx path] "
       "[--onnx-provider cpu|coreml|cuda|tensorrt] "
       "[--onnx-input-staging cpu|gpu] "
       "[--onnx-readback sync|pbo] "
@@ -353,6 +365,11 @@ bool ParseArgs(int argc, const char** argv) {
         return false;
       }
       shadow_onnx_path = std::string(argv[++i]);
+    } else if (!std::strcmp(argv[i], "--direct-onnx")) {
+      if (i + 1 >= argc) {
+        return false;
+      }
+      direct_onnx_path = std::string(argv[++i]);
     } else if (!std::strcmp(argv[i], "--onnx-provider")) {
       if (i + 1 >= argc) {
         return false;
@@ -360,6 +377,7 @@ bool ParseArgs(int argc, const char** argv) {
       const std::string provider = std::string(argv[++i]);
       indirect_config.execution_provider = provider;
       shadow_config.execution_provider = provider;
+      direct_config.execution_provider = provider;
     } else if (!std::strcmp(argv[i], "--onnx-input-staging")) {
       if (i + 1 >= argc) {
         return false;
@@ -395,21 +413,26 @@ bool ParseArgs(int argc, const char** argv) {
       indirect_config.screen_height = size;
       shadow_config.screen_width = size;
       shadow_config.screen_height = size;
+      direct_config.screen_width = size;
+      direct_config.screen_height = size;
     } else if (!std::strcmp(argv[i], "--onnx-screen-width")) {
       if (i + 1 >= argc || !ParseIntFlagValue(argv[++i], &indirect_config.screen_width)) {
         return false;
       }
       shadow_config.screen_width = indirect_config.screen_width;
+      direct_config.screen_width = indirect_config.screen_width;
     } else if (!std::strcmp(argv[i], "--onnx-screen-height")) {
       if (i + 1 >= argc || !ParseIntFlagValue(argv[++i], &indirect_config.screen_height)) {
         return false;
       }
       shadow_config.screen_height = indirect_config.screen_height;
+      direct_config.screen_height = indirect_config.screen_height;
     } else if (!std::strcmp(argv[i], "--onnx-rsm-face-size")) {
       if (i + 1 >= argc || !ParseIntFlagValue(argv[++i], &indirect_config.rsm_face_size)) {
         return false;
       }
       shadow_config.rsm_face_size = indirect_config.rsm_face_size;
+      direct_config.rsm_face_size = indirect_config.rsm_face_size;
     } else if (!std::strcmp(argv[i], "--onnx-max-scale")) {
       if (i + 3 >= argc ||
           !ParseFloatFlagValue(argv[++i], &indirect_config.max_scale[0]) ||
@@ -420,6 +443,9 @@ bool ParseArgs(int argc, const char** argv) {
       shadow_config.max_scale[0] = indirect_config.max_scale[0];
       shadow_config.max_scale[1] = indirect_config.max_scale[1];
       shadow_config.max_scale[2] = indirect_config.max_scale[2];
+      direct_config.max_scale[0] = indirect_config.max_scale[0];
+      direct_config.max_scale[1] = indirect_config.max_scale[1];
+      direct_config.max_scale[2] = indirect_config.max_scale[2];
     } else if (!std::strcmp(argv[i], "--dump-first-frame")) {
       dump_first_frame = true;
     } else if (!std::strcmp(argv[i], "--exit-after-dump")) {
@@ -455,8 +481,10 @@ bool ParseArgs(int argc, const char** argv) {
   }
   indirect_config.use_gpu_staging = onnx_gpu_staging;
   shadow_config.use_gpu_staging = onnx_gpu_staging;
+  direct_config.use_gpu_staging = onnx_gpu_staging;
   indirect_config.use_pbo_readback = onnx_pbo_readback;
   shadow_config.use_pbo_readback = onnx_pbo_readback;
+  direct_config.use_pbo_readback = onnx_pbo_readback;
   return true;
 }
 
@@ -543,13 +571,17 @@ bool WriteProfileJson(const std::filesystem::path& path, int framebuffer_width,
       << (onnx_pbo_readback ? "pbo" : "sync") << "\",\n";
   out << "  \"indirect_onnx\": \"" << JsonEscape(indirect_onnx_path.value_or("")) << "\",\n";
   out << "  \"shadow_onnx\": \"" << JsonEscape(shadow_onnx_path.value_or("")) << "\",\n";
+  out << "  \"direct_onnx\": \"" << JsonEscape(direct_onnx_path.value_or("")) << "\",\n";
   out << "  \"indirect_enabled\": " << JsonBool(indirect_backend.IsEnabled()) << ",\n";
   out << "  \"shadow_enabled\": " << JsonBool(shadow_backend.IsEnabled()) << ",\n";
+  out << "  \"direct_enabled\": " << JsonBool(direct_backend.IsEnabled()) << ",\n";
   out << "  \"indirect_init_failed\": " << JsonBool(indirect_init_failed) << ",\n";
   out << "  \"shadow_init_failed\": " << JsonBool(shadow_init_failed) << ",\n";
+  out << "  \"direct_init_failed\": " << JsonBool(direct_init_failed) << ",\n";
   out << "  \"runtime_input_failed\": " << JsonBool(runtime_input_failed) << ",\n";
   out << "  \"indirect_inference_failed\": " << JsonBool(indirect_inference_failed) << ",\n";
   out << "  \"shadow_inference_failed\": " << JsonBool(shadow_inference_failed) << ",\n";
+  out << "  \"direct_inference_failed\": " << JsonBool(direct_inference_failed) << ",\n";
   out << "  \"frames_total\": " << profiler.total_frames << ",\n";
   out << "  \"warmup_frames\": " << profiler.warmup_frames << ",\n";
   out << "  \"profiled_frames\": " << profiler.profiled_frames << ",\n";
@@ -563,6 +595,7 @@ bool WriteProfileJson(const std::filesystem::path& path, int framebuffer_width,
   out << "    \"input_pack\": " << average.input_pack_ms << ",\n";
   out << "    \"indirect_onnx\": " << average.indirect_onnx_ms << ",\n";
   out << "    \"shadow_onnx\": " << average.shadow_onnx_ms << ",\n";
+  out << "    \"direct_onnx\": " << average.direct_onnx_ms << ",\n";
   out << "    \"upload\": " << average.upload_ms << ",\n";
   out << "    \"compose\": " << average.compose_ms << ",\n";
   out << "    \"draw\": " << average.draw_ms << ",\n";
@@ -703,6 +736,53 @@ GLuint RunShadowBackend(mujoco::nelif::OnnxRuntimeInputs* inputs,
     *upload_ms = ElapsedMs(start, Clock::now());
   }
   return shadow_texture;
+}
+
+GLuint RunDirectBackend(mujoco::nelif::OnnxRuntimeInputs* inputs,
+                        double* inference_ms, double* upload_ms) {
+  if (inference_ms) {
+    *inference_ms = 0.0;
+  }
+  if (upload_ms) {
+    *upload_ms = 0.0;
+  }
+  if (!direct_backend.IsEnabled()) {
+    return 0;
+  }
+  if (!inputs) {
+    direct_inference_failed = true;
+    if (!direct_backend_warned) {
+      std::fprintf(stderr, "ONNX direct inference skipped: runtime inputs unavailable.\n");
+      direct_backend_warned = true;
+    }
+    return 0;
+  }
+
+  std::vector<float> direct_rgba;
+  std::string error;
+  TimePoint start = Clock::now();
+  if (!direct_backend.Run(*inputs, &direct_rgba, &error)) {
+    direct_inference_failed = true;
+    if (inference_ms) {
+      *inference_ms = ElapsedMs(start, Clock::now());
+    }
+    if (!direct_backend_warned) {
+      std::fprintf(stderr, "ONNX direct inference failed: %s\n", error.c_str());
+      direct_backend_warned = true;
+    }
+    return 0;
+  }
+  if (inference_ms) {
+    *inference_ms = ElapsedMs(start, Clock::now());
+  }
+
+  start = Clock::now();
+  UploadRuntimeTexture(&direct_texture, direct_rgba, direct_backend.output_width(),
+                       direct_backend.output_height());
+  if (upload_ms) {
+    *upload_ms = ElapsedMs(start, Clock::now());
+  }
+  return direct_texture;
 }
 
 bool DumpAttachment(const std::filesystem::path& dir, const char* name,
@@ -930,6 +1010,16 @@ int main(int argc, const char** argv) {
       std::fprintf(stderr, "ONNX shadow backend disabled: %s\n", error.c_str());
     }
   }
+  if (direct_onnx_path.has_value()) {
+    direct_config.model_path = *direct_onnx_path;
+    std::string error;
+    if (direct_backend.Init(direct_config, &error)) {
+      std::printf("%s: %s\n", direct_backend.Status(), direct_config.model_path.c_str());
+    } else {
+      direct_init_failed = true;
+      std::fprintf(stderr, "ONNX direct backend disabled: %s\n", error.c_str());
+    }
+  }
 
   std::printf(
       "View keys: 0 MuJoCo, 1 RuntimeShading, 2 DirectUnshadowed, 3 DirectShadowed, "
@@ -969,12 +1059,14 @@ int main(int argc, const char** argv) {
 
     mujoco::nelif::OnnxRuntimeInputs runtime_inputs;
     mujoco::nelif::OnnxRuntimeInputs* runtime_inputs_ptr = nullptr;
-    if (indirect_backend.IsEnabled() || shadow_backend.IsEnabled()) {
+    if (indirect_backend.IsEnabled() || shadow_backend.IsEnabled() ||
+        direct_backend.IsEnabled()) {
       mujoco::nelif::OnnxRuntimeInputTiming input_timing;
       float camera_pos[3];
       CurrentCameraPos(camera_pos);
       const mujoco::nelif::OnnxIndirectConfig& input_config =
-          indirect_backend.IsEnabled() ? indirect_config : shadow_config;
+          indirect_backend.IsEnabled() ? indirect_config :
+          shadow_backend.IsEnabled() ? shadow_config : direct_config;
       std::string error;
       stage_start = Clock::now();
       if (mujoco::nelif::BuildOnnxRuntimeInputs(gbuffer, screen_space_light, camera_pos,
@@ -1000,16 +1092,20 @@ int main(int argc, const char** argv) {
     runtime_pass.Resize(viewport.width, viewport.height);
     double indirect_upload_ms = 0.0;
     double shadow_upload_ms = 0.0;
+    double direct_upload_ms = 0.0;
     const GLuint neural_indirect_texture =
         RunIndirectBackend(runtime_inputs_ptr, &timing.indirect_onnx_ms,
                            &indirect_upload_ms);
     const GLuint neural_shadow_texture =
         RunShadowBackend(runtime_inputs_ptr, &timing.shadow_onnx_ms, &shadow_upload_ms);
-    timing.upload_ms = indirect_upload_ms + shadow_upload_ms;
+    const GLuint neural_direct_texture =
+        RunDirectBackend(runtime_inputs_ptr, &timing.direct_onnx_ms, &direct_upload_ms);
+    timing.upload_ms = indirect_upload_ms + shadow_upload_ms + direct_upload_ms;
 
     stage_start = Clock::now();
     runtime_pass.Render(gbuffer, screen_space_light, runtime_config,
-                        neural_indirect_texture, neural_shadow_texture);
+                        neural_indirect_texture, neural_shadow_texture,
+                        neural_direct_texture);
     timing.compose_ms = ElapsedMs(stage_start, Clock::now());
 
     if (dump_requested || (dump_first_frame && !dump_completed)) {
@@ -1046,12 +1142,14 @@ int main(int argc, const char** argv) {
                                              last_framebuffer_height);
   }
   const bool runtime_inference_failed =
-      indirect_init_failed || shadow_init_failed || runtime_input_failed ||
-      indirect_inference_failed || shadow_inference_failed;
+      indirect_init_failed || shadow_init_failed || direct_init_failed ||
+      runtime_input_failed || indirect_inference_failed || shadow_inference_failed ||
+      direct_inference_failed;
 
   runtime_pass.Shutdown();
   indirect_backend.Shutdown();
   shadow_backend.Shutdown();
+  direct_backend.Shutdown();
   if (indirect_texture) {
     glDeleteTextures(1, &indirect_texture);
     indirect_texture = 0;
@@ -1059,6 +1157,10 @@ int main(int argc, const char** argv) {
   if (shadow_texture) {
     glDeleteTextures(1, &shadow_texture);
     shadow_texture = 0;
+  }
+  if (direct_texture) {
+    glDeleteTextures(1, &direct_texture);
+    direct_texture = 0;
   }
   screen_space_light.Shutdown();
   gbuffer.Shutdown();

@@ -23,6 +23,7 @@ struct OnnxIndirectConfig {
 };
 
 using OnnxShadowConfig = OnnxIndirectConfig;
+using OnnxDirectConfig = OnnxIndirectConfig;
 
 constexpr int kOnnxRuntimeInputCount = 14;
 
@@ -96,6 +97,34 @@ class OnnxShadowBackend {
            const float camera_pos[3], std::vector<float>* shadow_rgba,
            std::string* error);
   bool Run(OnnxRuntimeInputs& inputs, std::vector<float>* shadow_rgba,
+           std::string* error);
+
+  int output_width() const;
+  int output_height() const;
+
+ private:
+  struct Impl;
+  Impl* impl_ = nullptr;
+};
+
+class OnnxDirectBackend {
+ public:
+  OnnxDirectBackend();
+  ~OnnxDirectBackend();
+
+  OnnxDirectBackend(const OnnxDirectBackend&) = delete;
+  OnnxDirectBackend& operator=(const OnnxDirectBackend&) = delete;
+
+  bool Init(const OnnxDirectConfig& config, std::string* error);
+  bool IsEnabled() const;
+  const char* Status() const;
+  void Shutdown();
+
+  // Writes unshadowed direct RGBA in OpenGL row order, ready for glTexImage2D.
+  bool Run(const GBufferPass& gbuffer, const ScreenSpaceLightPass& screen_space_light,
+           const float camera_pos[3], std::vector<float>* direct_rgba,
+           std::string* error);
+  bool Run(OnnxRuntimeInputs& inputs, std::vector<float>* direct_rgba,
            std::string* error);
 
   int output_width() const;

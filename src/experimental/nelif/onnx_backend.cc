@@ -1461,4 +1461,214 @@ int OnnxShadowBackend::output_height() const {
   return impl_->last_output_height > 0 ? impl_->last_output_height : impl_->config.screen_height;
 }
 
+struct OnnxDirectBackend::Impl {
+  OnnxDirectConfig config;
+  int last_output_width = 0;
+  int last_output_height = 0;
+  std::string status = "ONNX Runtime backend is not compiled in";
+
+#if MUJOCO_NELIF_HAS_ONNXRUNTIME
+  Ort::Env env{ORT_LOGGING_LEVEL_WARNING, "nelif_direct_onnx"};
+  Ort::SessionOptions session_options;
+  std::unique_ptr<Ort::Session> session;
+  Ort::MemoryInfo memory_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+#endif
+};
+
+OnnxDirectBackend::OnnxDirectBackend() : impl_(new Impl) {}
+
+OnnxDirectBackend::~OnnxDirectBackend() {
+  Shutdown();
+  delete impl_;
+  impl_ = nullptr;
+}
+
+bool OnnxDirectBackend::Init(const OnnxDirectConfig& config, std::string* error) {
+  impl_->config = config;
+#if MUJOCO_NELIF_HAS_ONNXRUNTIME
+  try {
+    impl_->session_options.SetIntraOpNumThreads(1);
+    impl_->session_options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_EXTENDED);
+    ConfigureExecutionProvider(&impl_->session_options, config);
+    impl_->session = std::make_unique<Ort::Session>(
+        impl_->env, config.model_path.c_str(), impl_->session_options);
+    impl_->status = "ONNX Runtime direct backend enabled provider=" +
+                    LowerAscii(config.execution_provider);
+    return true;
+  } catch (const Ort::Exception& ex) {
+    if (error) {
+      *error = ex.what();
+    }
+    impl_->status = "Failed to initialize ONNX Runtime direct backend";
+    return false;
+  } catch (const std::exception& ex) {
+    if (error) {
+      *error = ex.what();
+    }
+    impl_->status = "Failed to initialize ONNX Runtime direct backend";
+    return false;
+  }
+#else
+  if (error) {
+    *error =
+        "ONNX Runtime backend was not compiled. Configure with "
+        "-DMUJOCO_NELIF_ENABLE_ONNXRUNTIME=ON and "
+        "-DMUJOCO_NELIF_ONNXRUNTIME_ROOT=/path/to/onnxruntime.";
+  }
+  impl_->status = "ONNX Runtime backend is not compiled in";
+  return false;
+#endif
+}
+
+bool OnnxDirectBackend::IsEnabled() const {
+#if MUJOCO_NELIF_HAS_ONNXRUNTIME
+  return impl_ && impl_->session != nullptr;
+#else
+  return false;
+#endif
+}
+
+const char* OnnxDirectBackend::Status() const {
+  return impl_ ? impl_->status.c_str() : "ONNX Runtime backend is shut down";
+}
+
+void OnnxDirectBackend::Shutdown() {
+#if MUJOCO_NELIF_HAS_ONNXRUNTIME
+  if (impl_) {
+    impl_->session.reset();
+    impl_->status = "ONNX Runtime backend is shut down";
+  }
+#endif
+}
+
+bool OnnxDirectBackend::Run(const GBufferPass& gbuffer,
+                            const ScreenSpaceLightPass& screen_space_light,
+                            const float camera_pos[3],
+                            std::vector<float>* direct_rgba,
+                            std::string* error) {
+#if MUJOCO_NELIF_HAS_ONNXRUNTIME
+  OnnxRuntimeInputs input_buffers;
+  if (!BuildOnnxRuntimeInputs(gbuffer, screen_space_light, camera_pos, impl_->config,
+                              &input_buffers, error)) {
+    return false;
+  }
+  return Run(input_buffers, direct_rgba, error);
+#else
+  if (error) {
+    *error = "ONNX Runtime backend was not compiled.";
+  }
+  (void)gbuffer;
+  (void)screen_space_light;
+  (void)camera_pos;
+  (void)direct_rgba;
+  return false;
+#endif
+}
+
+bool OnnxDirectBackend::Run(OnnxRuntimeInputs& inputs,
+                            std::vector<float>* direct_rgba,
+                            std::string* error) {
+#if MUJOCO_NELIF_HAS_ONNXRUNTIME
+  if (!IsEnabled()) {
+    if (error) {
+      *error = "ONNX Runtime backend is not initialized.";
+    }
+    return false;
+  }
+
+  auto& buffers = inputs.buffers;
+  const auto& shapes = inputs.shapes;
+  const auto& input_names = RuntimeInputNames();
+
+  std::array<Ort::Value, kOnnxRuntimeInputCount> tensors = {
+      Ort::Value::CreateTensor<float>(impl_->memory_info, buffers[0].data(),
+                                      buffers[0].size(), shapes[0].data(), shapes[0].size()),
+      Ort::Value::CreateTensor<float>(impl_->memory_info, buffers[1].data(),
+                                      buffers[1].size(), shapes[1].data(), shapes[1].size()),
+      Ort::Value::CreateTensor<float>(impl_->memory_info, buffers[2].data(),
+                                      buffers[2].size(), shapes[2].data(), shapes[2].size()),
+      Ort::Value::CreateTensor<float>(impl_->memory_info, buffers[3].data(),
+                                      buffers[3].size(), shapes[3].data(), shapes[3].size()),
+      Ort::Value::CreateTensor<float>(impl_->memory_info, buffers[4].data(),
+                                      buffers[4].size(), shapes[4].data(), shapes[4].size()),
+      Ort::Value::CreateTensor<float>(impl_->memory_info, buffers[5].data(),
+                                      buffers[5].size(), shapes[5].data(), shapes[5].size()),
+      Ort::Value::CreateTensor<float>(impl_->memory_info, buffers[6].data(),
+                                      buffers[6].size(), shapes[6].data(), shapes[6].size()),
+      Ort::Value::CreateTensor<float>(impl_->memory_info, buffers[7].data(),
+                                      buffers[7].size(), shapes[7].data(), shapes[7].size()),
+      Ort::Value::CreateTensor<float>(impl_->memory_info, buffers[8].data(),
+                                      buffers[8].size(), shapes[8].data(), shapes[8].size()),
+      Ort::Value::CreateTensor<float>(impl_->memory_info, buffers[9].data(),
+                                      buffers[9].size(), shapes[9].data(), shapes[9].size()),
+      Ort::Value::CreateTensor<float>(impl_->memory_info, buffers[10].data(),
+                                      buffers[10].size(), shapes[10].data(), shapes[10].size()),
+      Ort::Value::CreateTensor<float>(impl_->memory_info, buffers[11].data(),
+                                      buffers[11].size(), shapes[11].data(), shapes[11].size()),
+      Ort::Value::CreateTensor<float>(impl_->memory_info, buffers[12].data(),
+                                      buffers[12].size(), shapes[12].data(), shapes[12].size()),
+      Ort::Value::CreateTensor<float>(impl_->memory_info, buffers[13].data(),
+                                      buffers[13].size(), shapes[13].data(), shapes[13].size()),
+  };
+
+  const std::array<const char*, 1> output_names = {"direct_shading"};
+  try {
+    auto outputs = impl_->session->Run(Ort::RunOptions{nullptr}, input_names.data(),
+                                      tensors.data(), input_names.size(),
+                                      output_names.data(), output_names.size());
+    if (outputs.empty()) {
+      if (error) {
+        *error = "ONNX Runtime returned no outputs.";
+      }
+      return false;
+    }
+    auto info = outputs[0].GetTensorTypeAndShapeInfo();
+    std::vector<int64_t> out_shape = info.GetShape();
+    if (out_shape.size() != 4 || out_shape[0] != 1 || out_shape[3] != 3) {
+      if (error) {
+        std::ostringstream out;
+        out << "Unexpected direct output shape:";
+        for (int64_t dim : out_shape) {
+          out << " " << dim;
+        }
+        *error = out.str();
+      }
+      return false;
+    }
+    const int out_h = static_cast<int>(out_shape[1]);
+    const int out_w = static_cast<int>(out_shape[2]);
+    RgbTopOriginToGlRgba(outputs[0].GetTensorData<float>(), out_w, out_h, direct_rgba);
+    impl_->last_output_width = out_w;
+    impl_->last_output_height = out_h;
+    return true;
+  } catch (const Ort::Exception& ex) {
+    if (error) {
+      *error = ex.what();
+    }
+    return false;
+  }
+#else
+  if (error) {
+    *error = "ONNX Runtime backend was not compiled.";
+  }
+  (void)inputs;
+  (void)direct_rgba;
+  return false;
+#endif
+}
+
+int OnnxDirectBackend::output_width() const {
+  if (!impl_) {
+    return 0;
+  }
+  return impl_->last_output_width > 0 ? impl_->last_output_width : impl_->config.screen_width;
+}
+
+int OnnxDirectBackend::output_height() const {
+  if (!impl_) {
+    return 0;
+  }
+  return impl_->last_output_height > 0 ? impl_->last_output_height : impl_->config.screen_height;
+}
+
 }  // namespace mujoco::nelif

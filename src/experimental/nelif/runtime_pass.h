@@ -40,7 +40,7 @@ class RuntimePass {
   void Resize(int width, int height);
   void Render(const GBufferPass& gbuffer, const ScreenSpaceLightPass& screen_space_light,
               const RuntimeConfig& config = RuntimeConfig(), GLuint indirect_texture = 0,
-              GLuint shadow_texture = 0);
+              GLuint shadow_texture = 0, GLuint direct_texture = 0);
   void DrawDebug(RuntimeAttachment attachment, int viewport_width, int viewport_height,
                  float exposure = 1.0f) const;
   void Shutdown();

@@ -110,8 +110,10 @@ uniform sampler2D uSSLightDepth;
 uniform sampler2D uSSLightVec;
 uniform sampler2D uIndirect;
 uniform sampler2D uShadow;
+uniform sampler2D uDirect;
 uniform int uUseIndirect;
 uniform int uUseShadow;
+uniform int uUseDirect;
 uniform vec3 uLightColor;
 uniform float uLightIntensity;
 uniform float uShadowBias;
@@ -153,6 +155,9 @@ void main() {
   vec3 specular_direct = specular * light_rgb * attenuation * spec_lobe * valid * uSpecularScale;
 
   vec3 direct_unshadowed = diffuse_direct + specular_direct;
+  if (uUseDirect != 0) {
+    direct_unshadowed = max(texture2D(uDirect, vUv).rgb, vec3(0.0)) * valid;
+  }
 
   float delta = depth.g - depth.r - uShadowBias;
   float visibility = 0.0;
@@ -263,7 +268,8 @@ void RuntimePass::Render(const GBufferPass& gbuffer,
                          const ScreenSpaceLightPass& screen_space_light,
                          const RuntimeConfig& config,
                          GLuint indirect_texture,
-                         GLuint shadow_texture) {
+                         GLuint shadow_texture,
+                         GLuint direct_texture) {
   Resize(gbuffer.width(), gbuffer.height());
 
   glBindFramebuffer(GL_FRAMEBUFFER, fbo_);
@@ -308,6 +314,11 @@ void RuntimePass::Render(const GBufferPass& gbuffer,
   } else {
     glUniform1i(glGetUniformLocation(runtime_program_, "uShadow"), 0);
   }
+  if (direct_texture) {
+    BindTexture2D(runtime_program_, "uDirect", GL_TEXTURE10, direct_texture);
+  } else {
+    glUniform1i(glGetUniformLocation(runtime_program_, "uDirect"), 0);
+  }
 
   float light_color[3] = {1.0f, 1.0f, 1.0f};
   float light_intensity = 0.0f;
@@ -329,6 +340,8 @@ void RuntimePass::Render(const GBufferPass& gbuffer,
               indirect_texture ? 1 : 0);
   glUniform1i(glGetUniformLocation(runtime_program_, "uUseShadow"),
               shadow_texture ? 1 : 0);
+  glUniform1i(glGetUniformLocation(runtime_program_, "uUseDirect"),
+              direct_texture ? 1 : 0);
 
   DrawFullScreenQuad();
 
